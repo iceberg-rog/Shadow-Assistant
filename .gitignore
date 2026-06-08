@@ -1,0 +1,19 @@
+# runtime state — contains the SSH private key, sqlite DB and logs
+data/
+
+# local env / secrets
+.env
+
+# image tarballs (used for offline transfer to geo-blocked hosts)
+*.tar
+*.tar.gz
+
+# python
+__pycache__/
+*.pyc
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

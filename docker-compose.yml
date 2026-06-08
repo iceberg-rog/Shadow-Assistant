@@ -1,0 +1,12 @@
+services:
+  fleet-panel:
+    build: .
+    container_name: fleet-panel
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - DASH_ADMIN_PASS=${DASH_ADMIN_PASS:-changeme}
+      - FLASK_SECRET=${FLASK_SECRET:-please-change}
+    volumes:
+      - ./data:/data
