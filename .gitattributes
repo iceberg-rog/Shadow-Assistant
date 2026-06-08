@@ -1,0 +1,4 @@
+# Keep LF endings so shell scripts run correctly on Linux targets
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
