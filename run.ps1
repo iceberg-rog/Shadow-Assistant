@@ -1,9 +1,13 @@
-# Fleet Panel launcher (Windows) - auto-starts Docker Desktop if needed
-# Usage: double-click run.bat, or: powershell -ExecutionPolicy Bypass -File run.ps1
-$ErrorActionPreference = "Stop"
+# Fleet Panel launcher (Windows) - auto-starts Docker Desktop if needed.
+# NOTE: we deliberately do NOT set $ErrorActionPreference='Stop' and we run docker
+# via `cmd /c "... >NUL 2>NUL"`: native tools write progress/errors to stderr, which
+# under 'Stop' would abort the script before the auto-start logic could run.
 Set-Location $PSScriptRoot
 
-function Test-DockerUp { docker info *> $null; return ($LASTEXITCODE -eq 0) }
+function Test-DockerUp {
+  cmd /c "docker info >NUL 2>NUL"
+  return ($LASTEXITCODE -eq 0)
+}
 
 # 1) docker CLI present?
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -13,7 +17,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# 2) make sure the engine is running - start Docker Desktop automatically if not
+# 2) ensure the engine is running - auto-start Docker Desktop if not
 if (-not (Test-DockerUp)) {
   Write-Host "Docker engine not running - starting Docker Desktop..." -ForegroundColor Yellow
   $paths = @(
@@ -22,12 +26,12 @@ if (-not (Test-DockerUp)) {
     "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
   )
   $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if ($exe) { Start-Process $exe } else {
-    Write-Host "Couldn't find Docker Desktop.exe - please open Docker Desktop manually." -ForegroundColor Yellow
-  }
+  if ($exe) { Start-Process $exe }
+  else { Write-Host "Couldn't find Docker Desktop.exe - open Docker Desktop manually." -ForegroundColor Yellow }
+
   Write-Host "Waiting for the Docker engine (first start can take 1-2 minutes)" -NoNewline -ForegroundColor Cyan
   $ready = $false
-  foreach ($i in 1..60) {
+  for ($i = 0; $i -lt 60; $i++) {
     if (Test-DockerUp) { $ready = $true; break }
     Start-Sleep -Seconds 3
     Write-Host "." -NoNewline
@@ -51,7 +55,7 @@ if (-not (Test-Path ".env")) {
 
 # 4) build + start
 Write-Host "Starting Fleet Panel (first build can take a few minutes)..." -ForegroundColor Cyan
-docker compose up -d --build
+cmd /c "docker compose up -d --build"
 if ($LASTEXITCODE -ne 0) {
   Write-Host "docker compose failed (see the error above)." -ForegroundColor Red
   exit 1
@@ -60,7 +64,7 @@ if ($LASTEXITCODE -ne 0) {
 # 5) verify the panel answers before claiming success
 $pass = (Select-String -Path ".env" -Pattern 'DASH_ADMIN_PASS=(.+)').Matches.Groups[1].Value
 $up = $false
-foreach ($i in 1..20) {
+for ($i = 0; $i -lt 20; $i++) {
   try {
     $r = Invoke-WebRequest -Uri "http://localhost:8088/login" -UseBasicParsing -TimeoutSec 3
     if ($r.StatusCode -eq 200) { $up = $true; break }
