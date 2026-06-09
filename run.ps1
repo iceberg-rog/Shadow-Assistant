@@ -1,22 +1,43 @@
-# Fleet Panel launcher (Windows)
-# Usage: right-click > Run with PowerShell, or: powershell -ExecutionPolicy Bypass -File run.ps1
+# Fleet Panel launcher (Windows) - auto-starts Docker Desktop if needed
+# Usage: double-click run.bat, or: powershell -ExecutionPolicy Bypass -File run.ps1
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+function Test-DockerUp { docker info *> $null; return ($LASTEXITCODE -eq 0) }
+
 # 1) docker CLI present?
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-  Write-Host "Docker is not installed." -ForegroundColor Red
-  Write-Host "Install Docker Desktop, then re-run: https://www.docker.com/products/docker-desktop/"
+  Write-Host "Docker Desktop is not installed." -ForegroundColor Red
+  Write-Host "Install it once (then re-run this): https://www.docker.com/products/docker-desktop/"
+  Start-Process "https://www.docker.com/products/docker-desktop/"
   exit 1
 }
 
-# 2) docker daemon actually running?
-docker info *> $null
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "Docker Desktop is installed but NOT running." -ForegroundColor Red
-  Write-Host "Open Docker Desktop, wait until it says 'Engine running' (steady whale icon)," -ForegroundColor Yellow
-  Write-Host "then run this again." -ForegroundColor Yellow
-  exit 1
+# 2) make sure the engine is running - start Docker Desktop automatically if not
+if (-not (Test-DockerUp)) {
+  Write-Host "Docker engine not running - starting Docker Desktop..." -ForegroundColor Yellow
+  $paths = @(
+    "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe",
+    "${env:ProgramFiles(x86)}\Docker\Docker\Docker Desktop.exe",
+    "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+  )
+  $exe = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+  if ($exe) { Start-Process $exe } else {
+    Write-Host "Couldn't find Docker Desktop.exe - please open Docker Desktop manually." -ForegroundColor Yellow
+  }
+  Write-Host "Waiting for the Docker engine (first start can take 1-2 minutes)" -NoNewline -ForegroundColor Cyan
+  $ready = $false
+  foreach ($i in 1..60) {
+    if (Test-DockerUp) { $ready = $true; break }
+    Start-Sleep -Seconds 3
+    Write-Host "." -NoNewline
+  }
+  Write-Host ""
+  if (-not $ready) {
+    Write-Host "Docker did not come up in time. Open Docker Desktop, wait for 'Engine running', then re-run." -ForegroundColor Red
+    exit 1
+  }
+  Write-Host "Docker engine is up." -ForegroundColor Green
 }
 
 # 3) first-run .env with a random admin password
@@ -36,10 +57,10 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
-# 5) verify the panel actually answers before claiming success
+# 5) verify the panel answers before claiming success
 $pass = (Select-String -Path ".env" -Pattern 'DASH_ADMIN_PASS=(.+)').Matches.Groups[1].Value
 $up = $false
-foreach ($i in 1..15) {
+foreach ($i in 1..20) {
   try {
     $r = Invoke-WebRequest -Uri "http://localhost:8088/login" -UseBasicParsing -TimeoutSec 3
     if ($r.StatusCode -eq 200) { $up = $true; break }
