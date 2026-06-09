@@ -7,7 +7,9 @@ credentials.
 
 - **Foreign role** → exit + [Marzban](https://github.com/Gozargah/Marzban) panel
   (VLESS + REALITY, auto self-signed TLS). **Working & tested.**
-- **Iran role** → domestic relay that forwards to a foreign exit. **Work in progress.**
+- **Iran role** → domestic relay that transparently forwards to a foreign exit and
+  auto-links it in Marzban (adds a Host) so customer configs point at the relay IP.
+  **Working & tested.**
 
 Auth to target servers is **SSH-key based**: the panel holds one Ed25519 keypair and
 never stores root passwords (an optional one-time password is used only to install the
@@ -54,8 +56,9 @@ Manual alternative (any OS): `cp .env.example .env`, edit it, then
 2. **➕ New Server** → pick role:
    - **Foreign (exit + panel)** — installs Docker + Marzban, generates REALITY keys and
      a TLS cert, brings the panel up, and returns its URL + admin user/pass.
-   - **Iran (relay)** — installs the relay and points it at a foreign exit (set the
-     exit IP). *Auto-tunnel linking is still being finalized.*
+   - **Iran (relay)** — installs a transparent relay pointing at a foreign exit (set the
+     exit IP), verifies forwarding, then auto-adds a Marzban Host so issued configs use
+     the relay's fast domestic IP.
 3. Watch the **live log**. On success the node shows `ready` plus the panel URL and
    admin credentials.
 
@@ -69,7 +72,7 @@ Manual alternative (any OS): `cp .env.example .env`, edit it, then
 |------|------|
 | `app.py` | Flask dashboard (server list, add/provision, live log, key auth) |
 | `installer/foreign.sh` | Foreign exit installer (Marzban + REALITY + TLS) |
-| `installer/iran.sh` | Iran relay installer (WIP) |
+| `installer/iran.sh` | Iran relay installer (transparent forward + Marzban auto-link) |
 | `Dockerfile`, `docker-compose.yml` | Containerized deploy |
 | `data/` | Runtime state: SSH keypair, sqlite DB, logs — **never commit** |
 
@@ -86,7 +89,6 @@ Manual alternative (any OS): `cp .env.example .env`, edit it, then
 - **Iran Docker geo-block:** Iranian server IPs can't pull from Docker Hub (HTTP 403).
   Run the dashboard itself outside Iran. For Iran *relay* nodes the installer pulls
   Xray from GitHub releases instead of Docker.
-- **Iran relay auto-tunnel** is not finished yet.
 - Marzban panels use a **self-signed cert**, so browsers show a warning (proceed
   anyway). Point a domain at a node to switch to a real certificate.
 
