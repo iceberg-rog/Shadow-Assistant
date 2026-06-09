@@ -88,10 +88,16 @@ def init_db():
                 key_installed INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'new',
                 result TEXT,
+                relay_id INTEGER,            -- foreign node's paired relay (set by /pair)
                 created_at INTEGER
             )
             """
         )
+        # migrate older DBs that predate the relay_id column
+        try:
+            conn.execute("ALTER TABLE nodes ADD COLUMN relay_id INTEGER")
+        except Exception:
+            pass
 
 
 def logfile(nid):
@@ -240,6 +246,7 @@ def provision(nid, bootstrap_password=None):
         row = conn.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone()
     if not row:
         return
+    cli = None
     try:
         open(logfile(nid), "w").close()
         log(nid, f"=== Provisioning {row['name']} ({row['ip']}) role={row['role']} ===")
@@ -283,7 +290,6 @@ def provision(nid, bootstrap_password=None):
                 log(nid, "Exit not ready: no tunnel params found. Provision the foreign exit "
                          "first (with the current installer), then retry this relay.")
                 set_status(nid, "failed")
-                cli.close()
                 return
             params["TUN_UUID"] = fres.get("tun_uuid", "")
             params["TUN_PUB"] = fres.get("tun_pub", "")
@@ -308,7 +314,6 @@ def provision(nid, bootstrap_password=None):
         except Exception:
             pass
 
-        cli.close()
         if code == 0:
             log(nid, "[3/3] Done ✅")
             set_status(nid, "ready", result)
@@ -337,6 +342,109 @@ def provision(nid, bootstrap_password=None):
     except Exception as e:
         log(nid, f"ERROR: {e}")
         set_status(nid, "failed")
+    finally:
+        if cli is not None:
+            try:
+                cli.close()
+            except Exception:
+                pass
+
+
+# ---------- paired (exit + relay) provisioning ----------
+_pair_locks = {}
+_pair_locks_guard = threading.Lock()
+
+
+def _pair_lock(fnid):
+    with _pair_locks_guard:
+        return _pair_locks.setdefault(fnid, threading.Lock())
+def pair_logfile(fnid):
+    return os.path.join(LOG_DIR, f"pair-{fnid}.log")
+
+
+def pairlog(fnid, msg):
+    with open(pair_logfile(fnid), "a", encoding="utf-8") as f:
+        f.write(msg.rstrip("\n") + "\n")
+
+
+def precheck_ssh(ip, port, user, password):
+    """Confirm we can reach + authenticate to a server BEFORE installing anything."""
+    try:
+        connect_key(ip, port, user, timeout=15).close()
+        return True, "key auth OK"
+    except paramiko.AuthenticationException:
+        if password:
+            try:
+                connect_password(ip, port, user, password, timeout=15).close()
+                return True, "password OK (dashboard key will be installed)"
+            except Exception as e:
+                return False, f"root password rejected ({e})"
+        return False, "dashboard key not on server and no root password given"
+    except Exception as e:
+        return False, f"unreachable ({e})"
+
+
+def provision_pair(foreign_nid, iran_nid, foreign_pw, iran_pw):
+    """One-shot pair install: pre-check BOTH, then exit, then relay, then summarize.
+    Pre-checks run first so we never install a foreign exit when the relay is unreachable.
+    Serialized per foreign node so a re-run can never overlap an in-flight install."""
+    lock = _pair_lock(foreign_nid)
+    lock.acquire()
+    try:
+        with db() as conn:
+            f = conn.execute("SELECT * FROM nodes WHERE id=?", (foreign_nid,)).fetchone()
+            r = conn.execute("SELECT * FROM nodes WHERE id=?", (iran_nid,)).fetchone()
+        if not f or not r:
+            return
+        pairlog(foreign_nid, "=== Pair install ===")
+        pairlog(foreign_nid, "[pre-flight] checking SSH access to both servers ...")
+        set_status(foreign_nid, "connecting")
+        set_status(iran_nid, "new")
+        ok_f, msg_f = precheck_ssh(f["ip"], f["ssh_port"], f["ssh_user"], foreign_pw)
+        pairlog(foreign_nid, f"    foreign {f['ip']}: {msg_f}")
+        ok_r, msg_r = precheck_ssh(r["ip"], r["ssh_port"], r["ssh_user"], iran_pw)
+        pairlog(foreign_nid, f"    iran    {r['ip']}: {msg_r}")
+        if not (ok_f and ok_r):
+            pairlog(foreign_nid, "PRE-CHECK FAILED — nothing was installed. Fix access and retry.")
+            set_status(foreign_nid, "failed")
+            set_status(iran_nid, "failed")
+            return
+
+        pairlog(foreign_nid, "[1/2] installing foreign exit (Marzban + 4 protocols + tunnels) ...")
+        provision(foreign_nid, foreign_pw)
+        with db() as conn:
+            fstat = conn.execute("SELECT status FROM nodes WHERE id=?", (foreign_nid,)).fetchone()["status"]
+        if fstat != "ready":
+            pairlog(foreign_nid, "Foreign exit failed — relay SKIPPED (see the exit's own log).")
+            set_status(iran_nid, "failed")
+            return
+        pairlog(foreign_nid, "[1/2] foreign exit READY.")
+
+        pairlog(foreign_nid, "[2/2] installing iran relay — probing UDP to auto-pick the tunnel ...")
+        provision(iran_nid, iran_pw)
+        with db() as conn:
+            rr = conn.execute("SELECT status, result FROM nodes WHERE id=?", (iran_nid,)).fetchone()
+        mode, fwd = "?", "?"
+        try:
+            rres = json.loads(rr["result"]) if rr and rr["result"] else {}
+            mode, fwd = rres.get("tunnel", "?"), rres.get("forwarding", "?")
+        except Exception:
+            pass
+        if rr and rr["status"] == "ready":
+            tier = "FAST (Hysteria/UDP)" if mode == "hysteria" else "REALITY-TCP (UDP filtered on this ISP)"
+            pairlog(foreign_nid, f"=== PAIR READY ✅   tunnel={mode} -> {tier}   end-to-end test: {fwd} ===")
+            pairlog(foreign_nid, "Open the exit's Marzban panel and create users — configs auto-point at the relay.")
+        else:
+            pairlog(foreign_nid, f"Relay install did not finish cleanly (status={rr['status'] if rr else '?'}). See the relay's log.")
+    except Exception as e:
+        pairlog(foreign_nid, f"PAIR ERROR: {e}")
+        try:
+            set_status(foreign_nid, "failed")
+            set_status(iran_nid, "failed")
+        except Exception:
+            pass
+    finally:
+        lock.release()
 
 
 def require_login():
@@ -384,7 +492,7 @@ KEY = """
 
 INDEX = """
 <div style="display:flex;justify-content:space-between;align-items:center">
- <h2>سرورها</h2><a class="btn" href="/add">➕ سرور جدید</a></div>
+ <h2>سرورها</h2><div><a class="btn" href="/pair">➕ جفت سرور (خارج+ایران)</a> &nbsp;<a class="btn gray" href="/add">+ تکی</a></div></div>
 <table><tr><th>نام</th><th>IP</th><th>نقش</th><th>کلید</th><th>وضعیت</th><th>پنل</th><th></th></tr>
 {% for s in nodes %}
 <tr><td>{{ s['name'] or '-' }}</td><td style="direction:ltr">{{ s['ip'] }}</td>
@@ -438,6 +546,65 @@ NODE = """
  function poll(){fetch("/node/{{ s['id'] }}/log").then(r=>r.text()).then(t=>{
    const b=document.getElementById('logbox');b.textContent=t;b.scrollTop=b.scrollHeight;});}
  if(["connecting","installing","new"].includes(st)){setInterval(poll,2000);}
+</script>
+"""
+
+PAIR_FORM = """
+<div class="card" style="max-width:660px;margin:0 auto"><h3>➕ جفت سرور جدید (خارج + ایران)</h3>
+{% if err %}<p style="color:#ff8a80">{{ err }}</p>{% endif %}
+<p style="color:#9aa4b2;font-size:13px">هر دو IP را بده. خودش <b>اول دسترسیِ هر دو را چک می‌کند</b> (اگر یکی در دسترس نبود هیچ‌چیز نصب نمی‌شود)، بعد اول خارج بعد ایران را نصب می‌کند، <b>UDP را تست می‌کند و بهترین تونل را خودکار انتخاب می‌کند</b> و نتیجه را نشان می‌دهد.</p>
+<form method="post">
+ <div style="display:flex;gap:16px;flex-wrap:wrap">
+  <div style="flex:1;min-width:270px;border:1px solid #262b36;border-radius:10px;padding:14px">
+   <b>🌍 سرور خارج (اکسیت)</b>
+   <label>نام</label><input name="f_name" placeholder="exit-de-1">
+   <label>IP</label><input name="f_ip" required placeholder="1.2.3.4">
+   <div style="display:flex;gap:8px"><div style="flex:2"><label>یوزر</label><input name="f_user" value="root"></div><div style="flex:1"><label>پورت</label><input name="f_port" value="22"></div></div>
+   <label>پسورد روت (اختیاری)</label><input type="password" name="f_password" placeholder="اگر کلید را گذاشته‌ای خالی">
+  </div>
+  <div style="flex:1;min-width:270px;border:1px solid #262b36;border-radius:10px;padding:14px">
+   <b>🇮🇷 سرور ایران (رله)</b>
+   <label>نام</label><input name="r_name" placeholder="relay-ir-1">
+   <label>IP</label><input name="r_ip" required placeholder="5.6.7.8">
+   <div style="display:flex;gap:8px"><div style="flex:2"><label>یوزر</label><input name="r_user" value="root"></div><div style="flex:1"><label>پورت</label><input name="r_port" value="22"></div></div>
+   <label>پسورد روت (اختیاری)</label><input type="password" name="r_password" placeholder="اگر کلید را گذاشته‌ای خالی">
+  </div>
+ </div>
+ <div style="margin-top:16px"><button class="btn">چک، نصب و تست</button> <a class="btn gray" href="/">انصراف</a></div>
+</form></div>
+"""
+
+PAIR_VIEW = """
+<div style="display:flex;justify-content:space-between;align-items:center">
+ <h2>جفت: {{ f['name'] or f['ip'] }} ↔ {{ (r['name'] or r['ip']) if r else '—' }}</h2>
+ <div><a class="btn gray" href="/">← همه</a>
+ {% if r %}<form method="post" action="/pair/{{ f['id'] }}/install" style="display:inline"><button class="btn">▶ نصب مجدد جفت</button></form>{% endif %}</div></div>
+<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px">
+ <div class="card" style="flex:1;min-width:290px">
+  <b>🌍 خارج</b> <span class="badge s-{{ f['status'] }}">{{ f['status'] }}</span>
+  &nbsp;<span style="direction:ltr;color:#9aa4b2">{{ f['ip'] }}</span>
+  {% if fres and fres.panel_url %}<hr style="border-color:#262b36">
+   <b>پنل:</b> <a href="{{ fres.panel_url }}" target="_blank" style="direction:ltr">{{ fres.panel_url }}</a><br>
+   <b>یوزر:</b> {{ fres.admin_user }} &nbsp; <b>پسورد:</b> {{ fres.admin_pass }}{% endif %}
+  <br><a href="/node/{{ f['id'] }}">لاگ خارج →</a>
+ </div>
+ <div class="card" style="flex:1;min-width:290px">
+  <b>🇮🇷 ایران</b> {% if r %}<span class="badge s-{{ r['status'] }}">{{ r['status'] }}</span>
+  &nbsp;<span style="direction:ltr;color:#9aa4b2">{{ r['ip'] }}</span>{% endif %}
+  {% if rres %}<hr style="border-color:#262b36">
+   <b>تونل:</b> {% if rres.tunnel=='hysteria' %}🟢 Hysteria — سریع{% elif rres.tunnel=='reality' %}🟡 REALITY-TCP — UDP این ISP فیلتره{% else %}{{ rres.tunnel }}{% endif %}
+   &nbsp;|&nbsp; <b>تستِ مسیر:</b> {% if rres.forwarding=='ok' %}✅ موفق{% else %}{{ rres.forwarding }}{% endif %}{% endif %}
+  {% if r %}<br><a href="/node/{{ r['id'] }}">لاگ ایران →</a>{% endif %}
+ </div>
+</div>
+<h4>پیشرفت جفت</h4><pre id="logbox">{{ plog }}</pre>
+<script>
+ function tick(){
+   fetch("/pair/{{ f['id'] }}/log").then(r=>r.text()).then(t=>{const b=document.getElementById('logbox');b.textContent=t;b.scrollTop=b.scrollHeight;});
+   fetch("/pair/{{ f['id'] }}/status").then(r=>r.json()).then(j=>{ if(j.done){ clearInterval(h); setTimeout(()=>location.reload(),900); } });
+ }
+ var h=null;
+ if({{ 'true' if live else 'false' }}){ h=setInterval(tick,2500); }
 </script>
 """
 
@@ -509,6 +676,130 @@ def add():
         threading.Thread(target=provision, args=(nid, pw), daemon=True).start()
         return redirect(url_for("node", nid=nid))
     return page(ADD)
+
+
+def _find_relay(conn, foreign_row):
+    """Resolve a foreign node's paired relay: by explicit relay_id, else fall back to the
+    exit_ip linkage (covers pairs created before the relay_id column existed)."""
+    try:
+        rid = foreign_row["relay_id"]
+    except (KeyError, IndexError):
+        rid = None
+    if rid:
+        r = conn.execute("SELECT * FROM nodes WHERE id=? AND role='iran'", (rid,)).fetchone()
+        if r:
+            return r
+    return conn.execute("SELECT * FROM nodes WHERE exit_ip=? AND role='iran' ORDER BY id DESC LIMIT 1",
+                        (foreign_row["ip"],)).fetchone()
+
+
+@app.route("/pair", methods=["GET", "POST"])
+def pair():
+    if not require_login():
+        return redirect(url_for("login"))
+    if request.method == "POST":
+        f = request.form
+        fip = f["f_ip"].strip()
+        rip = f["r_ip"].strip()
+
+        def port(v):
+            try:
+                p = int(v or 22)
+            except Exception:
+                p = 22
+            return p if 1 <= p <= 65535 else 22
+        if not fip or not rip:
+            return page(PAIR_FORM, err="IP هر دو سرور لازم است.")
+        now = int(time.time())
+        try:
+            with db() as conn:
+                cur = conn.execute(
+                    """INSERT INTO nodes (name, ip, ssh_user, ssh_port, role, exit_ip, status, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (f.get("f_name", "").strip() or "exit", fip,
+                     f.get("f_user", "root").strip() or "root", port(f.get("f_port")),
+                     "foreign", "", "new", now))
+                fnid = cur.lastrowid
+                rcur = conn.execute(
+                    """INSERT INTO nodes (name, ip, ssh_user, ssh_port, role, exit_ip, status, created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (f.get("r_name", "").strip() or "relay", rip,
+                     f.get("r_user", "root").strip() or "root", port(f.get("r_port")),
+                     "iran", fip, "new", now))
+                rnid = rcur.lastrowid
+                conn.execute("UPDATE nodes SET relay_id=? WHERE id=?", (rnid, fnid))
+        except Exception as e:
+            return page(PAIR_FORM, err=f"خطا در ساخت نودها: {e}")
+        fpw = f.get("f_password") or None
+        rpw = f.get("r_password") or None
+        open(pair_logfile(fnid), "w").close()
+        threading.Thread(target=provision_pair, args=(fnid, rnid, fpw, rpw), daemon=True).start()
+        return redirect(url_for("pair_view", nid=fnid))
+    return page(PAIR_FORM)
+
+
+@app.route("/pair/<int:nid>")
+def pair_view(nid):
+    if not require_login():
+        return redirect(url_for("login"))
+    with db() as conn:
+        f = conn.execute("SELECT * FROM nodes WHERE id=? AND role='foreign'", (nid,)).fetchone()
+        if not f:
+            abort(404)
+        r = _find_relay(conn, f)
+    fres = json.loads(f["result"]) if f["result"] else None
+    rres = json.loads(r["result"]) if r and r["result"] else None
+    plog = ""
+    if os.path.exists(pair_logfile(nid)):
+        with open(pair_logfile(nid), "r", encoding="utf-8") as fp:
+            plog = fp.read()
+    terminal = {"ready", "failed"}
+    live = (f["status"] not in terminal) or (r is not None and r["status"] not in terminal)
+    return page(PAIR_VIEW, f=f, r=r, fres=fres, rres=rres, plog=plog, live=live)
+
+
+@app.route("/pair/<int:nid>/log")
+def pair_log_route(nid):
+    if not require_login():
+        return Response("forbidden", status=403)
+    if os.path.exists(pair_logfile(nid)):
+        with open(pair_logfile(nid), "r", encoding="utf-8") as fp:
+            return Response(fp.read(), mimetype="text/plain")
+    return Response("", mimetype="text/plain")
+
+
+@app.route("/pair/<int:nid>/status")
+def pair_status(nid):
+    if not require_login():
+        return Response("forbidden", status=403)
+    with db() as conn:
+        f = conn.execute("SELECT * FROM nodes WHERE id=? AND role='foreign'", (nid,)).fetchone()
+        if not f:
+            return Response(json.dumps({"done": True}), mimetype="application/json")
+        r = _find_relay(conn, f)
+    terminal = {"ready", "failed"}
+    # stop polling once the foreign is terminal and the relay is also terminal OR absent
+    done = (f["status"] in terminal) and (r is None or r["status"] in terminal)
+    return Response(json.dumps({"done": done}), mimetype="application/json")
+
+
+@app.route("/pair/<int:nid>/install", methods=["POST"])
+def pair_reinstall(nid):
+    if not require_login():
+        return redirect(url_for("login"))
+    with db() as conn:
+        f = conn.execute("SELECT * FROM nodes WHERE id=? AND role='foreign'", (nid,)).fetchone()
+        if not f:
+            abort(404)
+        r = _find_relay(conn, f)
+    if f["status"] in ("connecting", "installing"):
+        return redirect(url_for("pair_view", nid=nid))  # a run is already in flight
+    if not r:
+        pairlog(nid, "ERROR: relay for this pair not found — recreate the pair.")
+        return redirect(url_for("pair_view", nid=nid))
+    open(pair_logfile(nid), "w").close()
+    threading.Thread(target=provision_pair, args=(nid, r["id"], None, None), daemon=True).start()
+    return redirect(url_for("pair_view", nid=nid))
 
 
 @app.route("/node/<int:nid>")
