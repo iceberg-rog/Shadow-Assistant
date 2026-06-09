@@ -18,7 +18,10 @@ if ! /usr/local/bin/xray version >/dev/null 2>&1; then
   apt-get update -qq && apt-get install -y -qq unzip curl openssl >/dev/null 2>&1 || true
   arch=$(uname -m); Z=Xray-linux-64.zip; [ "$arch" = "aarch64" ] && Z=Xray-linux-arm64-v8a.zip
   mkdir -p /usr/local/bin /usr/local/etc/xray
-  curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/$Z"
+  curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 --retry-delay 3 \
+    -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/$Z" \
+    || { echo "ERROR: failed to download xray from GitHub (network/geo-block) - aborting."; exit 1; }
+  unzip -tq /tmp/xray.zip >/dev/null 2>&1 || { echo "ERROR: xray.zip is corrupt/incomplete - aborting."; exit 1; }
   unzip -o /tmp/xray.zip xray -d /usr/local/bin/ >/dev/null
   chmod +x /usr/local/bin/xray
 fi

@@ -349,15 +349,16 @@ KEY = """
 INDEX = """
 <div style="display:flex;justify-content:space-between;align-items:center">
  <h2>سرورها</h2><a class="btn" href="/add">➕ سرور جدید</a></div>
-<table><tr><th>نام</th><th>IP</th><th>نقش</th><th>کلید</th><th>وضعیت</th><th></th></tr>
+<table><tr><th>نام</th><th>IP</th><th>نقش</th><th>کلید</th><th>وضعیت</th><th>پنل</th><th></th></tr>
 {% for s in nodes %}
 <tr><td>{{ s['name'] or '-' }}</td><td style="direction:ltr">{{ s['ip'] }}</td>
 <td>{{ 'خارج (اکسیت)' if s['role']=='foreign' else 'ایران (relay)' }}</td>
 <td>{{ '✅' if s['key_installed'] else '—' }}</td>
 <td><span class="badge s-{{ s['status'] }}">{{ s['status'] }}</span></td>
+<td>{% if s['panel_url'] %}<a href="{{ s['panel_url'] }}" target="_blank" style="direction:ltr">باز کردن ↗</a>{% else %}—{% endif %}</td>
 <td><a href="/node/{{ s['id'] }}">جزئیات →</a></td></tr>
 {% endfor %}
-{% if not nodes %}<tr><td colspan="6" style="color:#9aa4b2">هنوز سروری اضافه نشده.</td></tr>{% endif %}
+{% if not nodes %}<tr><td colspan="7" style="color:#9aa4b2">هنوز سروری اضافه نشده.</td></tr>{% endif %}
 </table>
 """
 
@@ -440,7 +441,15 @@ def index():
     if not require_login():
         return redirect(url_for("login"))
     with db() as conn:
-        nodes = conn.execute("SELECT * FROM nodes ORDER BY id DESC").fetchall()
+        rows = conn.execute("SELECT * FROM nodes ORDER BY id DESC").fetchall()
+    nodes = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["panel_url"] = json.loads(r["result"]).get("panel_url") if r["result"] else None
+        except Exception:
+            d["panel_url"] = None
+        nodes.append(d)
     return page(INDEX, nodes=nodes)
 
 
