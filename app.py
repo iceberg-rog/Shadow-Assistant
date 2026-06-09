@@ -176,6 +176,50 @@ def render_installer(role, params):
     return header + body
 
 
+# ---------- Marzban host automation (point customer configs at the relay) ----------
+import urllib.request as _urlreq
+import urllib.parse as _urlparse
+import ssl as _ssl
+
+_NOVERIFY = _ssl.create_default_context()
+_NOVERIFY.check_hostname = False
+_NOVERIFY.verify_mode = _ssl.CERT_NONE
+
+
+def _http_json(url, headers=None, data=None, method=None):
+    req = _urlreq.Request(url, data=data, headers=headers or {}, method=method)
+    with _urlreq.urlopen(req, context=_NOVERIFY, timeout=20) as r:
+        body = r.read().decode()
+    return json.loads(body) if body.strip() else {}
+
+
+def marzban_add_host(panel_base, admin_user, admin_pass, relay_ip, nid, inbound_tag="VLESS_REALITY"):
+    """Add a Marzban Host so issued customer configs point at the Iran relay IP."""
+    tok = _http_json(
+        panel_base + "/api/admin/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=_urlparse.urlencode({"username": admin_user, "password": admin_pass}).encode(),
+    )
+    auth = {"Authorization": "Bearer " + tok["access_token"]}
+    hosts = _http_json(panel_base + "/api/hosts", headers=auth)
+    lst = hosts.get(inbound_tag, []) or []
+    if any(h.get("address") == relay_ip for h in lst):
+        log(nid, f"Marzban Host for {relay_ip} already present.")
+        return
+    lst.append({
+        "remark": f"iran-relay {relay_ip}", "address": relay_ip, "port": 443,
+        "sni": "", "host": "", "path": "", "security": "inbound_default",
+        "alpn": "", "fingerprint": "",
+    })
+    hosts[inbound_tag] = lst
+    _http_json(
+        panel_base + "/api/hosts",
+        headers={**auth, "Content-Type": "application/json"},
+        data=json.dumps(hosts).encode(), method="PUT",
+    )
+    log(nid, f"Marzban Host added -> customer configs will use {relay_ip}")
+
+
 # ---------- provisioning worker ----------
 def provision(nid, bootstrap_password=None):
     with db() as conn:
@@ -232,6 +276,25 @@ def provision(nid, bootstrap_password=None):
         if code == 0:
             log(nid, "[3/3] Done ✅")
             set_status(nid, "ready", result)
+            # auto-link: point customer configs at this relay (iran role only)
+            if row["role"] == "iran" and row["exit_ip"]:
+                try:
+                    with db() as conn:
+                        fr = conn.execute(
+                            "SELECT result FROM nodes WHERE ip=? AND role='foreign' "
+                            "AND result IS NOT NULL ORDER BY id DESC LIMIT 1",
+                            (row["exit_ip"],)).fetchone()
+                    if fr and fr["result"]:
+                        fres = json.loads(fr["result"])
+                        base = (fres.get("panel_url") or "").replace("/dashboard/", "")
+                        if base and fres.get("admin_user"):
+                            log(nid, "Linking relay in Marzban (adding Host)...")
+                            marzban_add_host(base, fres["admin_user"],
+                                             fres["admin_pass"], row["ip"], nid)
+                    else:
+                        log(nid, "Foreign exit not found in panel DB - add the Marzban Host manually.")
+                except Exception as e:
+                    log(nid, f"Host auto-link skipped ({e}) - add the Marzban Host manually.")
         else:
             log(nid, "[3/3] Installer reported non-zero exit ❌")
             set_status(nid, "failed", result)
