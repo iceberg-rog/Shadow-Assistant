@@ -455,90 +455,168 @@ def require_login():
 BASE = """
 <!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Fleet Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
- body{font-family:system-ui,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e6e6;margin:0}
- header{background:#171a21;padding:14px 22px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #262b36}
- a{color:#5b9dff;text-decoration:none}.btn{background:#2d6cdf;color:#fff;padding:8px 14px;border-radius:8px;border:0;cursor:pointer;font-size:14px}
- .btn.gray{background:#39414f}.wrap{max-width:980px;margin:24px auto;padding:0 18px}
- table{width:100%;border-collapse:collapse;background:#171a21;border-radius:10px;overflow:hidden}
- th,td{padding:11px 13px;text-align:right;border-bottom:1px solid #262b36;font-size:14px}th{background:#1d212a;color:#9aa4b2}
- input,select{background:#0f1115;border:1px solid #303744;color:#e6e6e6;padding:9px;border-radius:8px;width:100%;box-sizing:border-box;font-size:14px}
- label{display:block;margin:12px 0 5px;color:#9aa4b2;font-size:13px}
- .card{background:#171a21;border:1px solid #262b36;border-radius:12px;padding:20px}
- .badge{padding:3px 9px;border-radius:20px;font-size:12px}
- .s-ready{background:#16432a;color:#5fd38a}.s-failed{background:#4a1f1f;color:#ff8a80}
- .s-installing,.s-connecting{background:#3a3414;color:#ffd95e}.s-new{background:#2a2f3a;color:#9aa4b2}
- pre{background:#0b0d11;border:1px solid #262b36;border-radius:10px;padding:14px;max-height:430px;overflow:auto;font-size:13px;line-height:1.5;direction:ltr;text-align:left}
- code{background:#0b0d11;padding:2px 6px;border-radius:5px;direction:ltr;display:inline-block}
+ :root{
+  --bg:#0a0c12; --bg2:#0e1118; --surface:#141925; --surface2:#1a2030; --line:#232b3b; --line2:#2e394d;
+  --text:#e8edf6; --muted:#8b97ad; --faint:#5d6779;
+  --accent:#5b8cff; --accent2:#7c5cff; --grad:linear-gradient(135deg,#5b8cff,#7c5cff);
+  --green:#3ad29f; --green-bg:rgba(58,210,159,.13); --red:#ff7a85; --red-bg:rgba(255,122,133,.13);
+  --amber:#ffcf5c; --amber-bg:rgba(255,207,92,.13);
+ }
+ *{box-sizing:border-box}
+ body{font-family:'Vazirmatn',system-ui,Segoe UI,Tahoma,sans-serif;background:
+   radial-gradient(1200px 600px at 80% -10%,rgba(124,92,255,.10),transparent 60%),
+   radial-gradient(1000px 500px at -10% 10%,rgba(91,140,255,.08),transparent 55%),var(--bg);
+   color:var(--text);margin:0;min-height:100vh;-webkit-font-smoothing:antialiased}
+ a{color:var(--accent);text-decoration:none;transition:.15s}a:hover{color:#86a9ff}
+ .wrap{max-width:1040px;margin:30px auto;padding:0 20px}
+ header{position:sticky;top:0;z-index:10;background:rgba(10,12,18,.72);backdrop-filter:blur(14px);
+   padding:14px 24px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)}
+ .logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--text)}
+ .logo .mark{width:30px;height:30px;border-radius:9px;background:var(--grad);display:grid;place-items:center;font-size:16px;box-shadow:0 4px 14px rgba(91,140,255,.4)}
+ .nav{display:flex;align-items:center;gap:6px}
+ .nav a{padding:7px 12px;border-radius:9px;color:var(--muted);font-size:14px}
+ .nav a:hover{background:var(--surface);color:var(--text)}
+ h2{font-size:22px;font-weight:700;margin:0} h3{font-size:18px;font-weight:600;margin:0 0 6px} h4{color:var(--muted);font-weight:600;font-size:14px;margin:18px 0 8px}
+ .btn{background:var(--grad);color:#fff;padding:9px 16px;border-radius:10px;border:0;cursor:pointer;font-family:inherit;font-size:14px;font-weight:600;
+   display:inline-flex;align-items:center;gap:6px;transition:.15s;box-shadow:0 3px 12px rgba(91,140,255,.28)}
+ .btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+ .btn.gray{background:var(--surface2);color:var(--text);box-shadow:none;border:1px solid var(--line2)}
+ .btn.gray:hover{background:#222a3c}
+ .btn.sm{padding:6px 12px;font-size:13px}
+ .card{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:16px;padding:22px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+ input,select{background:var(--bg);border:1px solid var(--line2);color:var(--text);padding:11px 12px;border-radius:10px;width:100%;box-sizing:border-box;font-family:inherit;font-size:14px;transition:.15s}
+ input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(91,140,255,.16)}
+ input::placeholder{color:var(--faint)}
+ label{display:block;margin:13px 0 6px;color:var(--muted);font-size:13px;font-weight:500}
+ .badge{padding:4px 11px;border-radius:30px;font-size:12px;font-weight:600;display:inline-flex;align-items:center;gap:6px;line-height:1}
+ .badge::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor}
+ .s-ready{background:var(--green-bg);color:var(--green)}.s-failed{background:var(--red-bg);color:var(--red)}
+ .s-installing,.s-connecting{background:var(--amber-bg);color:var(--amber)}
+ .s-installing::before,.s-connecting::before{animation:pulse 1.1s infinite}
+ .s-new{background:rgba(139,151,173,.13);color:var(--muted)}
+ @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+ pre{background:#070a10;border:1px solid var(--line);border-radius:12px;padding:15px;max-height:440px;overflow:auto;
+   font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.6;direction:ltr;text-align:left;color:#c7d0de}
+ pre::-webkit-scrollbar{width:9px;height:9px}pre::-webkit-scrollbar-thumb{background:var(--line2);border-radius:9px}
+ code{background:#070a10;border:1px solid var(--line);padding:2px 7px;border-radius:6px;direction:ltr;display:inline-block;font-family:'JetBrains Mono',monospace;font-size:12.5px}
+ table{width:100%;border-collapse:separate;border-spacing:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+ th,td{padding:13px 15px;text-align:right;border-bottom:1px solid var(--line);font-size:14px}
+ th{background:var(--bg2);color:var(--muted);font-weight:600}tr:last-child td{border-bottom:0}tbody tr:hover{background:var(--surface2)}
+ .mono{font-family:'JetBrains Mono',monospace;direction:ltr;font-size:13px}
+ .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:680px){.grid2{grid-template-columns:1fr}}
+ .row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+ hr{border:0;border-top:1px solid var(--line);margin:14px 0}
+ .kv b{color:var(--muted);font-weight:500}
 </style></head><body>
-<header><div><a href="/"><b>🛰️ Fleet Panel</b></a></div>
-<div>{% if session.auth %}<a href="/key">🔑 کلید عمومی</a> &nbsp; <a href="/logout">خروج</a>{% endif %}</div></header>
+<header>
+ <a href="/" class="logo"><span class="mark">🛰️</span> Fleet Panel</a>
+ <div class="nav">{% if session.auth %}<a href="/key">🔑 کلید عمومی</a><a href="/logout">خروج</a>{% endif %}</div>
+</header>
 <div class="wrap">{{ body|safe }}</div></body></html>
 """
 
 LOGIN = """
-<div class="card" style="max-width:360px;margin:60px auto"><h3>ورود</h3>
-{% if err %}<p style="color:#ff8a80">{{ err }}</p>{% endif %}
-<form method="post"><label>رمز عبور پنل</label><input type="password" name="password" autofocus>
-<div style="margin-top:16px"><button class="btn">ورود</button></div></form></div>
+<div style="max-width:380px;margin:7vh auto">
+ <div style="text-align:center;margin-bottom:22px">
+  <div style="width:56px;height:56px;border-radius:16px;background:var(--grad);display:inline-grid;place-items:center;font-size:27px;box-shadow:0 10px 30px rgba(91,140,255,.45)">🛰️</div>
+  <h2 style="margin-top:14px">Fleet Panel</h2>
+  <p style="color:var(--muted);margin:5px 0 0;font-size:14px">برای مدیریت فلیت وارد شو</p>
+ </div>
+ <div class="card">
+  {% if err %}<div style="background:var(--red-bg);color:var(--red);padding:10px 13px;border-radius:10px;font-size:13px;margin-bottom:4px">{{ err }}</div>{% endif %}
+  <form method="post"><label>رمز عبور پنل</label><input type="password" name="password" autofocus>
+  <div style="margin-top:18px"><button class="btn" style="width:100%;justify-content:center">ورود</button></div></form>
+ </div>
+</div>
 """
 
 KEY = """
-<div class="card"><h3>🔑 کلید عمومی داشبورد</h3>
-<p style="color:#9aa4b2">این کلید را موقع ساخت سرور جدید (مثلاً بخش SSH Keys در Cloudzy) اضافه کن تا بدون پسورد وصل شود.
+<div class="row" style="margin-bottom:18px"><h2>🔑 کلید عمومی</h2><a class="btn gray sm" href="/">← بازگشت</a></div>
+<div class="card">
+<p style="color:var(--muted);font-size:13.5px;line-height:1.75;margin-top:0">این کلید را موقع ساخت سرور جدید (بخش SSH Keys سرویس‌دهنده) اضافه کن تا بدون پسورد وصل شود،
 یا روی سرور موجود در <code>~/.ssh/authorized_keys</code> بگذار.</p>
-<pre>{{ pub }}</pre></div>
+<pre id="pk">{{ pub }}</pre>
+<button class="btn gray sm" onclick="navigator.clipboard.writeText(document.getElementById('pk').textContent.trim());this.textContent='کپی شد ✓'">📋 کپی کلید</button>
+</div>
 """
 
 INDEX = """
-<div style="display:flex;justify-content:space-between;align-items:center">
- <h2>سرورها</h2><div><a class="btn" href="/pair">➕ جفت سرور (خارج+ایران)</a> &nbsp;<a class="btn gray" href="/add">+ تکی</a></div></div>
-<table><tr><th>نام</th><th>IP</th><th>نقش</th><th>کلید</th><th>وضعیت</th><th>پنل</th><th></th></tr>
+<style>
+ .servers{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+ .srv{background:linear-gradient(180deg,var(--surface),var(--bg2));border:1px solid var(--line);border-radius:15px;padding:17px;transition:.16s}
+ .srv:hover{border-color:var(--line2);transform:translateY(-2px);box-shadow:0 12px 30px rgba(0,0,0,.32)}
+ .srv .ip{font-family:'JetBrains Mono',monospace;direction:ltr;color:var(--muted);font-size:12.5px;margin-top:3px}
+ .srv .meta{color:var(--faint);font-size:12.5px;margin:11px 0}
+ .srv .acts{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line);padding-top:12px;margin-top:3px}
+ .ricon{width:30px;height:30px;border-radius:9px;display:inline-grid;place-items:center;background:var(--surface2);border:1px solid var(--line2);font-size:15px;flex:none}
+ .empty{text-align:center;color:var(--muted);padding:48px 20px}
+</style>
+<div class="row" style="margin-bottom:20px">
+ <h2>سرورها</h2>
+ <div style="display:flex;gap:8px"><a class="btn" href="/pair">➕ جفت سرور</a><a class="btn gray" href="/add">+ تکی</a></div>
+</div>
+{% if nodes %}
+<div class="servers">
 {% for s in nodes %}
-<tr><td>{{ s['name'] or '-' }}</td><td style="direction:ltr">{{ s['ip'] }}</td>
-<td>{{ 'خارج (اکسیت)' if s['role']=='foreign' else 'ایران (relay)' }}</td>
-<td>{{ '✅' if s['key_installed'] else '—' }}</td>
-<td><span class="badge s-{{ s['status'] }}">{{ s['status'] }}</span></td>
-<td>{% if s['panel_url'] %}<a href="{{ s['panel_url'] }}" target="_blank" style="direction:ltr">باز کردن ↗</a>{% else %}—{% endif %}</td>
-<td><a href="/node/{{ s['id'] }}">جزئیات →</a></td></tr>
+ <div class="srv">
+  <div class="row" style="align-items:flex-start">
+   <div style="display:flex;align-items:center;gap:10px"><span class="ricon">{{ '🌍' if s['role']=='foreign' else '🇮🇷' }}</span>
+    <div><b>{{ s['name'] or 'بدون‌نام' }}</b><div class="ip">{{ s['ip'] }}</div></div></div>
+   <span class="badge s-{{ s['status'] }}">{{ s['status'] }}</span>
+  </div>
+  <div class="meta">{{ 'خارج · اکسیت + پنل' if s['role']=='foreign' else 'ایران · رله' }}{% if s['key_installed'] %} · کلید ✓{% endif %}</div>
+  <div class="acts">
+   {% if s['panel_url'] %}<a class="btn gray sm" href="{{ s['panel_url'] }}" target="_blank">پنل ↗</a>{% else %}<span style="color:var(--faint);font-size:13px">بدون پنل</span>{% endif %}
+   <a href="/node/{{ s['id'] }}">جزئیات →</a>
+  </div>
+ </div>
 {% endfor %}
-{% if not nodes %}<tr><td colspan="7" style="color:#9aa4b2">هنوز سروری اضافه نشده.</td></tr>{% endif %}
-</table>
+</div>
+{% else %}
+<div class="card empty">🛰️<br><br>هنوز سروری اضافه نشده.<br><br><a class="btn" href="/pair">➕ اولین جفت را اضافه کن</a></div>
+{% endif %}
 """
 
 ADD = """
-<div class="card" style="max-width:560px;margin:0 auto"><h3>افزودن سرور</h3>
+<div class="row" style="margin-bottom:18px"><h2>افزودن سرور تکی</h2><a class="btn gray sm" href="/">← بازگشت</a></div>
+<div class="card" style="max-width:560px">
 <form method="post">
  <label>نام (دلخواه)</label><input name="name" placeholder="exit-de-1">
  <label>نقش سرور</label>
  <select name="role" onchange="document.getElementById('eb').style.display=this.value==='iran'?'block':'none'">
-   <option value="foreign">خارج — اکسیت + پنل</option>
-   <option value="iran">ایران — relay به اکسیت</option></select>
- <div id="eb" style="display:none"><label>IP اکسیت خارج (که این relay به آن وصل می‌شود)</label>
+   <option value="foreign">🌍 خارج — اکسیت + پنل</option>
+   <option value="iran">🇮🇷 ایران — رله به اکسیت</option></select>
+ <div id="eb" style="display:none"><label>IP اکسیت خارج (که این رله به آن وصل می‌شود)</label>
    <input name="exit_ip" placeholder="آی‌پی سرور خارجِ نصب‌شده"></div>
  <label>IP سرور</label><input name="ip" required placeholder="1.2.3.4">
  <div style="display:flex;gap:10px"><div style="flex:2"><label>یوزر SSH</label><input name="ssh_user" value="root"></div>
    <div style="flex:1"><label>پورت</label><input name="ssh_port" value="22"></div></div>
  <label>پسورد روت — فقط یک‌بار برای نصب کلید (ذخیره نمی‌شود)</label>
- <input type="password" name="password" placeholder="اگر کلید عمومی داشبورد را از قبل گذاشته‌ای، خالی بگذار">
- <p style="color:#9aa4b2;font-size:12px">اول «خارج» را نصب کن، بعد «ایران». پسورد فقط برای افزودن کلیدِ داشبورد استفاده و سپس دور انداخته می‌شود.</p>
- <div style="margin-top:14px"><button class="btn">اتصال و نصب</button> <a class="btn gray" href="/">انصراف</a></div>
+ <input type="password" name="password" placeholder="اگر کلید را از قبل گذاشته‌ای، خالی بگذار">
+ <p style="color:var(--faint);font-size:12.5px;margin-top:10px;line-height:1.7">اول «خارج» را نصب کن، بعد «ایران» — یا از دکمه‌ی «جفت سرور» استفاده کن تا خودکار و یک‌مرحله‌ای شود.</p>
+ <div style="margin-top:16px;display:flex;gap:8px"><button class="btn">اتصال و نصب</button> <a class="btn gray" href="/">انصراف</a></div>
 </form></div>
 """
 
 NODE = """
-<div style="display:flex;justify-content:space-between;align-items:center">
- <h2>{{ s['name'] or s['ip'] }} <span class="badge s-{{ s['status'] }}">{{ s['status'] }}</span></h2>
- <div><a class="btn gray" href="/">← همه</a>
- <form method="post" action="/node/{{ s['id'] }}/install" style="display:inline"><button class="btn">▶ نصب مجدد</button></form></div></div>
+<div class="row" style="margin-bottom:18px">
+ <h2>{{ s['name'] or s['ip'] }} &nbsp;<span class="badge s-{{ s['status'] }}">{{ s['status'] }}</span></h2>
+ <div style="display:flex;gap:8px"><a class="btn gray sm" href="/">← همه</a>
+ <form method="post" action="/node/{{ s['id'] }}/install" style="display:inline"><button class="btn sm">▶ نصب مجدد</button></form></div></div>
 <div class="card" style="margin-bottom:16px">
- <b>IP:</b> <span style="direction:ltr">{{ s['ip'] }}:{{ s['ssh_port'] }}</span> &nbsp;|&nbsp;
- <b>نقش:</b> {{ 'خارج (اکسیت)' if s['role']=='foreign' else 'ایران (relay)' }}
- &nbsp;|&nbsp; <b>کلید نصب‌شده:</b> {{ '✅' if s['key_installed'] else '—' }}
- {% if s['exit_ip'] %}&nbsp;→ اکسیت {{ s['exit_ip'] }}{% endif %}
- {% if result %}<hr style="border-color:#262b36">
-   {% if result.panel_url %}<b>پنل:</b> <a href="{{ result.panel_url }}" target="_blank" style="direction:ltr">{{ result.panel_url }}</a><br>{% endif %}
-   {% if result.admin_user %}<b>یوزر:</b> {{ result.admin_user }} &nbsp; <b>پسورد:</b> {{ result.admin_pass }}{% endif %}
+ <div class="kv" style="display:flex;flex-wrap:wrap;gap:8px 22px;font-size:14px">
+  <span><b>IP:</b> <span class="mono">{{ s['ip'] }}:{{ s['ssh_port'] }}</span></span>
+  <span><b>نقش:</b> {{ 'خارج (اکسیت)' if s['role']=='foreign' else 'ایران (رله)' }}</span>
+  <span><b>کلید:</b> {{ '✓' if s['key_installed'] else '—' }}</span>
+  {% if s['exit_ip'] %}<span><b>اکسیت:</b> <span class="mono">{{ s['exit_ip'] }}</span></span>{% endif %}
+ </div>
+ {% if result %}<hr>
+   {% if result.panel_url %}<div style="margin-bottom:7px"><b style="color:var(--muted)">پنل:</b> <a href="{{ result.panel_url }}" target="_blank" class="mono">{{ result.panel_url }}</a></div>{% endif %}
+   {% if result.admin_user %}<div><b style="color:var(--muted)">یوزر:</b> <code>{{ result.admin_user }}</code> &nbsp; <b style="color:var(--muted)">پسورد:</b> <code>{{ result.admin_pass }}</code></div>{% endif %}
+   {% if result.tunnel %}<div style="margin-top:7px"><b style="color:var(--muted)">تونل:</b> {{ result.tunnel }}</div>{% endif %}
  {% endif %}</div>
 <h4>لاگ نصب</h4><pre id="logbox">{{ logtext }}</pre>
 <script>
@@ -550,51 +628,52 @@ NODE = """
 """
 
 PAIR_FORM = """
-<div class="card" style="max-width:660px;margin:0 auto"><h3>➕ جفت سرور جدید (خارج + ایران)</h3>
-{% if err %}<p style="color:#ff8a80">{{ err }}</p>{% endif %}
-<p style="color:#9aa4b2;font-size:13px">هر دو IP را بده. خودش <b>اول دسترسیِ هر دو را چک می‌کند</b> (اگر یکی در دسترس نبود هیچ‌چیز نصب نمی‌شود)، بعد اول خارج بعد ایران را نصب می‌کند، <b>UDP را تست می‌کند و بهترین تونل را خودکار انتخاب می‌کند</b> و نتیجه را نشان می‌دهد.</p>
+<div class="row" style="margin-bottom:18px"><h2>➕ جفت سرور جدید</h2><a class="btn gray sm" href="/">← بازگشت</a></div>
+<div class="card" style="max-width:720px">
+{% if err %}<div style="background:var(--red-bg);color:var(--red);padding:10px 13px;border-radius:10px;font-size:13px;margin-bottom:12px">{{ err }}</div>{% endif %}
+<p style="color:var(--muted);font-size:13.5px;line-height:1.8;margin-top:0">هر دو IP را بده. خودش <b style="color:var(--text)">اول دسترسیِ هر دو را چک می‌کند</b> (اگر یکی در دسترس نبود هیچ‌چیز نصب نمی‌شود)، بعد اول خارج بعد ایران را نصب می‌کند، <b style="color:var(--text)">UDP را تست می‌کند و بهترین تونل را خودکار انتخاب می‌کند</b> و نتیجه را نشان می‌دهد.</p>
 <form method="post">
- <div style="display:flex;gap:16px;flex-wrap:wrap">
-  <div style="flex:1;min-width:270px;border:1px solid #262b36;border-radius:10px;padding:14px">
-   <b>🌍 سرور خارج (اکسیت)</b>
+ <div class="grid2">
+  <div style="border:1px solid var(--line2);border-radius:13px;padding:16px;background:var(--bg2)">
+   <div style="font-weight:600;margin-bottom:4px">🌍 سرور خارج (اکسیت)</div>
    <label>نام</label><input name="f_name" placeholder="exit-de-1">
    <label>IP</label><input name="f_ip" required placeholder="1.2.3.4">
    <div style="display:flex;gap:8px"><div style="flex:2"><label>یوزر</label><input name="f_user" value="root"></div><div style="flex:1"><label>پورت</label><input name="f_port" value="22"></div></div>
    <label>پسورد روت (اختیاری)</label><input type="password" name="f_password" placeholder="اگر کلید را گذاشته‌ای خالی">
   </div>
-  <div style="flex:1;min-width:270px;border:1px solid #262b36;border-radius:10px;padding:14px">
-   <b>🇮🇷 سرور ایران (رله)</b>
+  <div style="border:1px solid var(--line2);border-radius:13px;padding:16px;background:var(--bg2)">
+   <div style="font-weight:600;margin-bottom:4px">🇮🇷 سرور ایران (رله)</div>
    <label>نام</label><input name="r_name" placeholder="relay-ir-1">
    <label>IP</label><input name="r_ip" required placeholder="5.6.7.8">
    <div style="display:flex;gap:8px"><div style="flex:2"><label>یوزر</label><input name="r_user" value="root"></div><div style="flex:1"><label>پورت</label><input name="r_port" value="22"></div></div>
    <label>پسورد روت (اختیاری)</label><input type="password" name="r_password" placeholder="اگر کلید را گذاشته‌ای خالی">
   </div>
  </div>
- <div style="margin-top:16px"><button class="btn">چک، نصب و تست</button> <a class="btn gray" href="/">انصراف</a></div>
+ <div style="margin-top:18px;display:flex;gap:8px"><button class="btn">⚡ چک، نصب و تست</button> <a class="btn gray" href="/">انصراف</a></div>
 </form></div>
 """
 
 PAIR_VIEW = """
-<div style="display:flex;justify-content:space-between;align-items:center">
- <h2>جفت: {{ f['name'] or f['ip'] }} ↔ {{ (r['name'] or r['ip']) if r else '—' }}</h2>
- <div><a class="btn gray" href="/">← همه</a>
- {% if r %}<form method="post" action="/pair/{{ f['id'] }}/install" style="display:inline"><button class="btn">▶ نصب مجدد جفت</button></form>{% endif %}</div></div>
-<div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px">
- <div class="card" style="flex:1;min-width:290px">
-  <b>🌍 خارج</b> <span class="badge s-{{ f['status'] }}">{{ f['status'] }}</span>
-  &nbsp;<span style="direction:ltr;color:#9aa4b2">{{ f['ip'] }}</span>
-  {% if fres and fres.panel_url %}<hr style="border-color:#262b36">
-   <b>پنل:</b> <a href="{{ fres.panel_url }}" target="_blank" style="direction:ltr">{{ fres.panel_url }}</a><br>
-   <b>یوزر:</b> {{ fres.admin_user }} &nbsp; <b>پسورد:</b> {{ fres.admin_pass }}{% endif %}
-  <br><a href="/node/{{ f['id'] }}">لاگ خارج →</a>
+<div class="row" style="margin-bottom:18px">
+ <h2>جفت: {{ f['name'] or f['ip'] }} <span style="color:var(--faint)">↔</span> {{ (r['name'] or r['ip']) if r else '—' }}</h2>
+ <div style="display:flex;gap:8px"><a class="btn gray sm" href="/">← همه</a>
+ {% if r %}<form method="post" action="/pair/{{ f['id'] }}/install" style="display:inline"><button class="btn sm">▶ نصب مجدد جفت</button></form>{% endif %}</div></div>
+<div class="grid2" style="margin-bottom:16px">
+ <div class="card">
+  <div class="row"><span style="font-weight:600">🌍 خارج</span><span class="badge s-{{ f['status'] }}">{{ f['status'] }}</span></div>
+  <div class="mono" style="color:var(--muted);font-size:13px;margin-top:6px">{{ f['ip'] }}</div>
+  {% if fres and fres.panel_url %}<hr>
+   <div style="margin-bottom:6px"><b style="color:var(--muted)">پنل:</b> <a href="{{ fres.panel_url }}" target="_blank" class="mono">{{ fres.panel_url }}</a></div>
+   <div><b style="color:var(--muted)">یوزر:</b> <code>{{ fres.admin_user }}</code> &nbsp; <b style="color:var(--muted)">پسورد:</b> <code>{{ fres.admin_pass }}</code></div>{% endif %}
+  <div style="margin-top:12px"><a href="/node/{{ f['id'] }}">لاگ خارج →</a></div>
  </div>
- <div class="card" style="flex:1;min-width:290px">
-  <b>🇮🇷 ایران</b> {% if r %}<span class="badge s-{{ r['status'] }}">{{ r['status'] }}</span>
-  &nbsp;<span style="direction:ltr;color:#9aa4b2">{{ r['ip'] }}</span>{% endif %}
-  {% if rres %}<hr style="border-color:#262b36">
-   <b>تونل:</b> {% if rres.tunnel=='hysteria' %}🟢 Hysteria — سریع{% elif rres.tunnel=='reality' %}🟡 REALITY-TCP — UDP این ISP فیلتره{% else %}{{ rres.tunnel }}{% endif %}
-   &nbsp;|&nbsp; <b>تستِ مسیر:</b> {% if rres.forwarding=='ok' %}✅ موفق{% else %}{{ rres.forwarding }}{% endif %}{% endif %}
-  {% if r %}<br><a href="/node/{{ r['id'] }}">لاگ ایران →</a>{% endif %}
+ <div class="card">
+  <div class="row"><span style="font-weight:600">🇮🇷 ایران</span>{% if r %}<span class="badge s-{{ r['status'] }}">{{ r['status'] }}</span>{% endif %}</div>
+  {% if r %}<div class="mono" style="color:var(--muted);font-size:13px;margin-top:6px">{{ r['ip'] }}</div>{% endif %}
+  {% if rres %}<hr>
+   <div><b style="color:var(--muted)">تونل:</b> {% if rres.tunnel=='hysteria' %}<span style="color:var(--green)">🟢 Hysteria — سریع</span>{% elif rres.tunnel=='reality' %}<span style="color:var(--amber)">🟡 REALITY-TCP</span> <span style="color:var(--faint);font-size:12px">(UDP این ISP فیلتره)</span>{% else %}{{ rres.tunnel }}{% endif %}</div>
+   <div style="margin-top:6px"><b style="color:var(--muted)">تستِ مسیر:</b> {% if rres.forwarding=='ok' %}<span style="color:var(--green)">✅ موفق</span>{% else %}{{ rres.forwarding }}{% endif %}</div>{% endif %}
+  {% if r %}<div style="margin-top:12px"><a href="/node/{{ r['id'] }}">لاگ ایران →</a></div>{% endif %}
  </div>
 </div>
 <h4>پیشرفت جفت</h4><pre id="logbox">{{ plog }}</pre>
