@@ -5,11 +5,14 @@ VPN nodes) from one place. You add a server (IP + SSH access + role), and the pa
 SSHes in, installs the stack, tests it, and hands back the node's panel URL + admin
 credentials.
 
-- **Foreign role** → exit + [Marzban](https://github.com/Gozargah/Marzban) panel
-  (VLESS + REALITY, auto self-signed TLS). **Working & tested.**
-- **Iran role** → domestic relay that transparently forwards to a foreign exit and
-  auto-links it in Marzban (adds a Host) so customer configs point at the relay IP.
+- **Foreign role** → exit + [Marzban](https://github.com/Gozargah/Marzban) panel with
+  **four customer inbounds** — VLESS+REALITY (443), VMess (8080), Trojan+TLS (8443),
+  Shadowsocks (8388) — plus a standalone **REALITY tunnel receiver** (9443) for the relay.
   **Working & tested.**
+- **Iran role** → domestic relay. It captures each customer port and ships traffic to the
+  exit inside a **VLESS+REALITY tunnel** (so the Iran→exit hop looks like plain TLS to
+  Cloudflare and *every* protocol passes DPI), then auto-links all four protocols in
+  Marzban so customer configs point at the relay IP. **Working & tested.**
 
 Auth to target servers is **SSH-key based**: the panel holds one Ed25519 keypair and
 never stores root passwords (an optional one-time password is used only to install the
