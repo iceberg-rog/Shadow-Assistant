@@ -7,12 +7,15 @@ credentials.
 
 - **Foreign role** → exit + [Marzban](https://github.com/Gozargah/Marzban) panel with
   **four customer inbounds** — VLESS+REALITY (443), VMess (8080), Trojan+TLS (8443),
-  Shadowsocks (8388) — plus a standalone **REALITY tunnel receiver** (9443) for the relay.
-  **Working & tested.**
-- **Iran role** → domestic relay. It captures each customer port and ships traffic to the
-  exit inside a **VLESS+REALITY tunnel** (so the Iran→exit hop looks like plain TLS to
-  Cloudflare and *every* protocol passes DPI), then auto-links all four protocols in
-  Marzban so customer configs point at the relay IP. **Working & tested.**
+  Shadowsocks (8388) — kernel tuning (BBR + big UDP buffers), and **both** tunnel
+  receivers: a **Hysteria2 server** (UDP 9444, the fast path) and a **REALITY-TCP
+  receiver** (9443, the always-works fallback). **Working & tested.**
+- **Iran role** → domestic relay that **auto-picks the best tunnel**. It captures each
+  customer port and, after *probing* whether this ISP lets a sustained UDP flow survive,
+  ships traffic to the exit over **Hysteria2** (UDP — beats per-flow TCP throttling, much
+  faster) or falls back to a **VLESS+REALITY** TCP tunnel when UDP is filtered. Either way
+  the hop looks like TLS to Cloudflare so *every* protocol passes DPI, and all four are
+  auto-linked in Marzban so customer configs point at the relay IP. **Working & tested.**
 
 Auth to target servers is **SSH-key based**: the panel holds one Ed25519 keypair and
 never stores root passwords (an optional one-time password is used only to install the

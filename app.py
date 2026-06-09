@@ -288,6 +288,11 @@ def provision(nid, bootstrap_password=None):
             params["TUN_UUID"] = fres.get("tun_uuid", "")
             params["TUN_PUB"] = fres.get("tun_pub", "")
             params["TUN_SID"] = fres.get("tun_sid", "")
+            # Optional fast-path (Hysteria2) params — the relay probes UDP and uses these
+            # if a sustained UDP flow survives this ISP, else it falls back to REALITY-TCP.
+            params["HY_PORT"] = fres.get("hy_port", "")
+            params["HY_AUTH"] = fres.get("hy_auth", "")
+            params["HY_OBFS"] = fres.get("hy_obfs", "")
         log(nid, f"[2/3] Running '{row['role']}' installer ...")
         script = render_installer(row["role"], params)
         code = run_stream(cli, nid, f"bash -s <<'__FLEET_EOF__'\n{script}\n__FLEET_EOF__")
