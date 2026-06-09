@@ -17,17 +17,33 @@ key, then discarded).
 
 ## Quick start
 
+Needs **Docker** (Docker Desktop on Windows/macOS, Docker Engine on Linux). The
+launcher creates a `.env` with a random admin password on first run, builds the
+image, starts the panel, and prints the login.
+
 > Run this on a machine **outside Iran** (Docker Hub is geo-blocked from Iranian IPs —
 > see *Known limitations*).
 
 ```bash
-git clone <your-repo-url> fleet-panel && cd fleet-panel
-cp .env.example .env
-# edit .env and set a strong DASH_ADMIN_PASS + FLASK_SECRET
-docker compose up -d --build
+git clone https://github.com/iceberg-rog/Shadow-Assistant.git
+cd Shadow-Assistant
 ```
 
-Open `http://<host>:8088/login` and log in with `DASH_ADMIN_PASS`.
+**Windows** — double-click `run.bat`, or in PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File run.ps1
+```
+
+**Linux / macOS:**
+```bash
+chmod +x run.sh && ./run.sh
+```
+
+Either way the panel comes up at **http://localhost:8088/login**. The launcher prints
+the admin password (also stored in `.env`).
+
+Manual alternative (any OS): `cp .env.example .env`, edit it, then
+`docker compose up -d --build`.
 
 ## Using it
 
