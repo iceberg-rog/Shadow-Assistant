@@ -1,23 +1,51 @@
-# Fleet Panel launcher (Windows) - auto-starts Docker Desktop if needed.
-# NOTE: we deliberately do NOT set $ErrorActionPreference='Stop' and we run docker
-# via `cmd /c "... >NUL 2>NUL"`: native tools write progress/errors to stderr, which
-# under 'Stop' would abort the script before the auto-start logic could run.
+# Fleet Panel launcher (Windows)
+# Checks prerequisites (Git, Docker Desktop) and auto-installs missing ones via winget,
+# then auto-starts the Docker engine and brings the panel up.
+# NOTE: no $ErrorActionPreference='Stop' on purpose - native tools (docker/winget) write
+# to stderr, which under 'Stop' would abort the script. We gate on exit codes instead.
 Set-Location $PSScriptRoot
 
-function Test-DockerUp {
-  cmd /c "docker info >NUL 2>NUL"
-  return ($LASTEXITCODE -eq 0)
+function Have($cmd) { return [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
+function Refresh-Path {
+  $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+              [Environment]::GetEnvironmentVariable("Path","User")
+}
+function Test-DockerUp { cmd /c "docker info >NUL 2>NUL"; return ($LASTEXITCODE -eq 0) }
+
+# ---- prerequisite: winget (needed to auto-install the rest) ----
+$canWinget = Have winget
+if (-not $canWinget) {
+  Write-Host "winget (App Installer) not found - can't auto-install prerequisites." -ForegroundColor Yellow
+  Write-Host "Install 'App Installer' from the Microsoft Store, or install Git/Docker manually, then re-run."
 }
 
-# 1) docker CLI present?
-if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-  Write-Host "Docker Desktop is not installed." -ForegroundColor Red
-  Write-Host "Install it once (then re-run this): https://www.docker.com/products/docker-desktop/"
-  Start-Process "https://www.docker.com/products/docker-desktop/"
-  exit 1
+# ---- prerequisite: Git ----
+if (-not (Have git)) {
+  Write-Host "Git not found." -ForegroundColor Yellow
+  if ($canWinget) {
+    Write-Host "Installing Git via winget..." -ForegroundColor Cyan
+    winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements --silent
+    Refresh-Path
+  }
+  if (-not (Have git)) { Write-Host "Could not install Git. Get it from https://git-scm.com/download/win" -ForegroundColor Red }
 }
 
-# 2) ensure the engine is running - auto-start Docker Desktop if not
+# ---- prerequisite: Docker Desktop ----
+if (-not (Have docker)) {
+  Write-Host "Docker not found." -ForegroundColor Yellow
+  if ($canWinget) {
+    Write-Host "Installing Docker Desktop via winget (large download)..." -ForegroundColor Cyan
+    winget install -e --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+    Write-Host "Docker Desktop installed. A Windows RESTART is usually required (WSL2)." -ForegroundColor Yellow
+  }
+  if (-not (Have docker)) {
+    Write-Host "Docker still not on PATH. Restart Windows, then run this again." -ForegroundColor Red
+    exit 1
+  }
+}
+
+# ---- ensure the Docker engine is running (auto-start Docker Desktop) ----
 if (-not (Test-DockerUp)) {
   Write-Host "Docker engine not running - starting Docker Desktop..." -ForegroundColor Yellow
   $paths = @(
@@ -31,7 +59,7 @@ if (-not (Test-DockerUp)) {
 
   Write-Host "Waiting for the Docker engine (first start can take 1-2 minutes)" -NoNewline -ForegroundColor Cyan
   $ready = $false
-  for ($i = 0; $i -lt 60; $i++) {
+  for ($i = 0; $i -lt 80; $i++) {
     if (Test-DockerUp) { $ready = $true; break }
     Start-Sleep -Seconds 3
     Write-Host "." -NoNewline
@@ -44,7 +72,7 @@ if (-not (Test-DockerUp)) {
   Write-Host "Docker engine is up." -ForegroundColor Green
 }
 
-# 3) first-run .env with a random admin password
+# ---- first-run .env ----
 if (-not (Test-Path ".env")) {
   $chars  = (48..57) + (65..90) + (97..122)
   $admin  = -join ($chars | Get-Random -Count 16 | ForEach-Object { [char]$_ })
@@ -53,7 +81,7 @@ if (-not (Test-Path ".env")) {
   Write-Host "Created .env  |  Dashboard password: $admin" -ForegroundColor Green
 }
 
-# 4) build + start
+# ---- build + start ----
 Write-Host "Starting Fleet Panel (first build can take a few minutes)..." -ForegroundColor Cyan
 cmd /c "docker compose up -d --build"
 if ($LASTEXITCODE -ne 0) {
@@ -61,7 +89,7 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
-# 5) verify the panel answers before claiming success
+# ---- verify the panel answers ----
 $pass = (Select-String -Path ".env" -Pattern 'DASH_ADMIN_PASS=(.+)').Matches.Groups[1].Value
 $up = $false
 for ($i = 0; $i -lt 20; $i++) {
