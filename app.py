@@ -299,6 +299,11 @@ def provision(nid, bootstrap_password=None):
             params["HY_PORT"] = fres.get("hy_port", "")
             params["HY_AUTH"] = fres.get("hy_auth", "")
             params["HY_OBFS"] = fres.get("hy_obfs", "")
+            # mKCP (plain non-QUIC UDP) middle tier — used when QUIC/Hysteria is filtered but
+            # plain UDP survives this ISP, before falling all the way back to REALITY-TCP.
+            params["MK_PORT"] = fres.get("mk_port", "")
+            params["MK_UUID"] = fres.get("mk_uuid", "")
+            params["MK_SEED"] = fres.get("mk_seed", "")
         log(nid, f"[2/3] Running '{row['role']}' installer ...")
         script = render_installer(row["role"], params)
         code = run_stream(cli, nid, f"bash -s <<'__FLEET_EOF__'\n{script}\n__FLEET_EOF__")

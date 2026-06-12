@@ -79,6 +79,11 @@ ADMIN_PASS=$(openssl rand -base64 15 | tr -d '/+=' | cut -c1-16)
 SID=$(openssl rand -hex 8)
 TUN_SID=$(openssl rand -hex 8)
 TUN_UUID=$(cat /proc/sys/kernel/random/uuid)
+# mKCP (plain non-QUIC UDP) tunnel receiver params. Iran filters QUIC (Hysteria) but lets
+# plain UDP through on many ISPs, so mKCP is the middle tier between Hysteria and REALITY-TCP.
+MK_PORT="9445"
+MK_UUID=$(cat /proc/sys/kernel/random/uuid)
+MK_SEED=$(openssl rand -hex 8)
 # Persist Hysteria creds so a REINSTALL keeps the same auth/obfs and already-provisioned
 # relays don't lose the fast path (a reinstall that regenerated them would desync relays).
 mkdir -p /etc/hysteria
@@ -123,6 +128,7 @@ services:
       UVICORN_SSL_KEYFILE: "/var/lib/marzban/ssl_key.pem"
       UVICORN_SSL_CA_TYPE: "private"
       XRAY_JSON: "/var/lib/marzban/xray_config.json"
+      SQLALCHEMY_DATABASE_URL: "sqlite:////var/lib/marzban/db.sqlite3"
       XRAY_SUBSCRIPTION_URL_PREFIX: "https://${SERVER_IP}:${PANEL_PORT}"
     volumes:
       - /var/lib/marzban:/var/lib/marzban
@@ -204,6 +210,19 @@ cat > /usr/local/etc/xray-tunnel/config.json <<EOF
           "privateKey": "${TUN_PRIV}", "shortIds": ["${TUN_SID}"]
         }
       }
+    },
+    {
+      "tag": "mkcp-in",
+      "listen": "0.0.0.0", "port": ${MK_PORT}, "protocol": "vless",
+      "settings": { "clients": [ { "id": "${MK_UUID}" } ], "decryption": "none" },
+      "streamSettings": {
+        "network": "mkcp",
+        "kcpSettings": {
+          "mtu": 1350, "tti": 50, "uplinkCapacity": 100, "downlinkCapacity": 100,
+          "congestion": true, "readBufferSize": 2, "writeBufferSize": 2,
+          "header": { "type": "dtls" }, "seed": "${MK_SEED}"
+        }
+      }
     }
   ],
   "outbounds": [ { "protocol": "freedom", "tag": "direct" } ]
@@ -211,7 +230,7 @@ cat > /usr/local/etc/xray-tunnel/config.json <<EOF
 EOF
 cat > /etc/systemd/system/xray-tunnel.service <<'EOF'
 [Unit]
-Description=Xray Tunnel Receiver (REALITY-TCP fallback)
+Description=Xray Tunnel Receiver (REALITY-TCP 9443 + mKCP-UDP 9445)
 After=network.target
 [Service]
 ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray-tunnel/config.json
@@ -277,6 +296,7 @@ docker compose up -d
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
   for p in ${PANEL_PORT} 443 9443; do ufw allow ${p}/tcp >/dev/null 2>&1 || true; done
   ufw allow ${HY_PORT}/udp >/dev/null 2>&1 || true
+  ufw allow ${MK_PORT}/udp >/dev/null 2>&1 || true
 fi
 
 # --- 9) wait for the panel ---
@@ -300,7 +320,7 @@ echo "REALITY_PUBLIC_KEY=${PUB}"
 echo "REALITY_SHORT_ID=${SID}"
 if [ -n "$ok" ] && systemctl is-active --quiet xray-tunnel; then
   echo "panel up on ${PANEL_PORT}; REALITY tunnel on 9443; hysteria ${HY_READY}"
-  echo "FLEET_RESULT={\"panel_url\":\"https://${SERVER_IP}:${PANEL_PORT}/dashboard/\",\"admin_user\":\"${ADMIN_USER}\",\"admin_pass\":\"${ADMIN_PASS}\",\"reality_pbk\":\"${PUB}\",\"reality_sid\":\"${SID}\",\"tun_uuid\":\"${TUN_UUID}\",\"tun_pub\":\"${TUN_PUB}\",\"tun_sid\":\"${TUN_SID}\",\"hy_port\":\"${HY_PORT}\",\"hy_auth\":\"${HY_AUTH}\",\"hy_obfs\":\"${HY_OBFS}\"}"
+  echo "FLEET_RESULT={\"panel_url\":\"https://${SERVER_IP}:${PANEL_PORT}/dashboard/\",\"admin_user\":\"${ADMIN_USER}\",\"admin_pass\":\"${ADMIN_PASS}\",\"reality_pbk\":\"${PUB}\",\"reality_sid\":\"${SID}\",\"tun_uuid\":\"${TUN_UUID}\",\"tun_pub\":\"${TUN_PUB}\",\"tun_sid\":\"${TUN_SID}\",\"hy_port\":\"${HY_PORT}\",\"hy_auth\":\"${HY_AUTH}\",\"hy_obfs\":\"${HY_OBFS}\",\"mk_port\":\"${MK_PORT}\",\"mk_uuid\":\"${MK_UUID}\",\"mk_seed\":\"${MK_SEED}\"}"
 else
   echo "panel or REALITY tunnel did not come up in time; check: docker compose -f /opt/marzban/docker-compose.yml logs ; systemctl status xray-tunnel"
   exit 1
