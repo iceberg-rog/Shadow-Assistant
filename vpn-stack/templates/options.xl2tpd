@@ -1,0 +1,18 @@
+require-mschap-v2
+refuse-mschap
+ms-dns 1.1.1.1
+ms-dns 8.8.8.8
+asyncmap 0
+auth
+crtscts
+lock
+hide-password
+modem
+proxyarp
+lcp-echo-interval 30
+lcp-echo-failure 4
+nodefaultroute
+noccp
+connect-delay 5000
+mtu 1400
+mru 1400

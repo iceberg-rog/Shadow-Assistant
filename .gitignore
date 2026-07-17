@@ -17,3 +17,7 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# vpn-stack per-user state (passwords)
+users.json
+/opt/ovpnpanel/
