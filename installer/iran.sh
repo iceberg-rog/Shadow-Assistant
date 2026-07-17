@@ -145,6 +145,10 @@ fi
 [ "$MODE" = "reality" ] && echo ">> Using Tier 3: REALITY-TCP (always works; TCP isn't UDP-filtered)."
 
 # --- 3) relay xray config: dokodemo inbounds -> the chosen tunnel outbound ---
+# Main customer ports 443/8080/8443/8388 PLUS alt ports (2053/2083 -> VLESS:443,
+# 2052/8880 -> VMESS:8080) so clients whose ISP filters the main ports have a
+# fallback into the SAME tunnel. Each alt dokodemo just re-targets an existing
+# customer inbound, so no exit-side change is needed.
 mkdir -p /usr/local/etc/xray
 if [ "$MODE" = "hysteria" ]; then
   TUNNEL_OUT='{ "tag": "tunnel", "protocol": "socks", "settings": { "servers": [ { "address": "127.0.0.1", "port": 1080 } ] } }'
@@ -160,13 +164,17 @@ cat > /usr/local/etc/xray/config.json <<EOF
     { "tag": "in-443",  "listen": "0.0.0.0", "port": 443,  "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 443,  "network": "tcp" } },
     { "tag": "in-8080", "listen": "0.0.0.0", "port": 8080, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8080, "network": "tcp" } },
     { "tag": "in-8443", "listen": "0.0.0.0", "port": 8443, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8443, "network": "tcp" } },
-    { "tag": "in-8388", "listen": "0.0.0.0", "port": 8388, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8388, "network": "tcp,udp" } }
+    { "tag": "in-8388", "listen": "0.0.0.0", "port": 8388, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8388, "network": "tcp,udp" } },
+    { "tag": "in-2053", "listen": "0.0.0.0", "port": 2053, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 443,  "network": "tcp" } },
+    { "tag": "in-2083", "listen": "0.0.0.0", "port": 2083, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 443,  "network": "tcp" } },
+    { "tag": "in-2052", "listen": "0.0.0.0", "port": 2052, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8080, "network": "tcp" } },
+    { "tag": "in-8880", "listen": "0.0.0.0", "port": 8880, "protocol": "dokodemo-door", "settings": { "address": "127.0.0.1", "port": 8080, "network": "tcp" } }
   ],
   "outbounds": [
     ${TUNNEL_OUT},
     { "tag": "block", "protocol": "blackhole" }
   ],
-  "routing": { "rules": [ { "type": "field", "inboundTag": ["in-443","in-8080","in-8443","in-8388"], "outboundTag": "tunnel" } ] }
+  "routing": { "rules": [ { "type": "field", "inboundTag": ["in-443","in-8080","in-8443","in-8388","in-2053","in-2083","in-2052","in-8880"], "outboundTag": "tunnel" } ] }
 }
 EOF
 /usr/local/bin/xray -test -c /usr/local/etc/xray/config.json >/dev/null 2>&1 \
@@ -194,7 +202,7 @@ echo "relay service: $(systemctl is-active xray-relay)  (mode=${MODE})"
 
 # --- 5) firewall: customer ports (clients connect to the relay here) ---
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi active; then
-  for p in 443 8080 8443 8388; do ufw allow ${p}/tcp >/dev/null 2>&1 || true; done
+  for p in 443 8080 8443 8388 2053 2083 2052 8880; do ufw allow ${p}/tcp >/dev/null 2>&1 || true; done
 fi
 
 # --- 6) verify: listening + the tunnel actually reaches the exit's REALITY server ---
