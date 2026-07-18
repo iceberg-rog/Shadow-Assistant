@@ -56,9 +56,16 @@ def load_key(s):
         except Exception: pass
     raise ValueError("unreadable private key")
 
+FLEET_KEY = "/opt/provision/prov_key"
+
+def fleet_pub():
+    try: return open(FLEET_KEY + ".pub").read().strip()
+    except Exception: return ""
+
 def connect(ip, user, method, secret):
     c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    if method == "key": c.connect(ip, username=user, pkey=load_key(secret), timeout=20, look_for_keys=False, allow_agent=False)
+    if method == "fleet": c.connect(ip, username=user, pkey=paramiko.Ed25519Key.from_private_key_file(FLEET_KEY), timeout=20, look_for_keys=False, allow_agent=False)
+    elif method == "key": c.connect(ip, username=user, pkey=load_key(secret), timeout=20, look_for_keys=False, allow_agent=False)
     else: c.connect(ip, username=user, password=secret, timeout=20, look_for_keys=False, allow_agent=False)
     return c
 
@@ -81,13 +88,22 @@ def probe(c, method, secret):
     return False, False, None, "no root / no sudo"
 
 def test_one(ip, user, method, secret):
-    if not ip or not secret: return {"ok": False, "msg": "Enter the IP and the password/key."}
+    if not ip: return {"ok": False, "msg": "Enter the server IP."}
+    if method != "fleet" and not secret: return {"ok": False, "msg": "Enter the password/key (or use the Fleet key)."}
     if paramiko is None: return {"ok": False, "msg": "paramiko missing on the relay."}
     if method == "key":
         try: load_key(secret)
         except Exception: return {"ok": False, "msg": "That private key can't be read. Paste the WHOLE key file (the -----BEGIN...----- and -----END...----- lines and everything between)."}
     try: c = connect(ip, user, method, secret)
-    except paramiko.AuthenticationException: return {"ok": False, "msg": "Login failed. The key/password was refused by %s (wrong user, or the key isn't authorized there)." % ip}
+    except paramiko.AuthenticationException:
+        if method == "fleet":
+            return {"ok": False, "msg": "%s refused the fleet key. Add this exact line to the new server (root SSH keys), then Test again:  %s" % (ip, fleet_pub())}
+        if method == "key":
+            try:
+                pk = load_key(secret)
+                return {"ok": False, "msg": "%s refused this key. The PUBLIC key for what you pasted is:  %s %s  — exactly this line must be in the new server's root authorized_keys. If your Hetzner SSH key differs, you pasted the wrong private key." % (ip, pk.get_name(), pk.get_base64())}
+            except Exception: pass
+        return {"ok": False, "msg": "Login failed on %s: wrong username or password." % ip}
     except Exception as e: return {"ok": False, "msg": "Cannot reach %s: %s" % (ip, e)}
     try:
         is_root, can_sudo, _, how = probe(c, method, secret)
@@ -200,9 +216,12 @@ def srv_block(pfx, title, subtitle):
     return ("<div class=card><div style='font-weight:600'>" + title + "</div><div class=hint>" + subtitle + "</div>"
         "<div class=row><div><label>IP address</label><input id=" + pfx + "ip type=text placeholder='1.2.3.4' autocomplete=off></div>"
         "<div><label>SSH user</label><input id=" + pfx + "user type=text value=root autocomplete=off></div></div>"
-        "<label>Login</label><div style='font-size:14px'><label style='display:inline;font-weight:400'><input type=radio name=" + pfx + "auth value=password checked onclick=am('" + pfx + "')> Password</label>&nbsp;&nbsp;"
-        "<label style='display:inline;font-weight:400'><input type=radio name=" + pfx + "auth value=key onclick=am('" + pfx + "')> SSH key</label></div>"
-        "<div id=" + pfx + "pwbox><input id=" + pfx + "pw type=password placeholder='root password' autocomplete=off></div>"
+        "<label>Login</label><div style='font-size:14px'>"
+        "<label style='display:inline;font-weight:400'><input type=radio name=" + pfx + "auth value=fleet checked onclick=am('" + pfx + "')> Fleet key</label>&nbsp;&nbsp;"
+        "<label style='display:inline;font-weight:400'><input type=radio name=" + pfx + "auth value=password onclick=am('" + pfx + "')> Password</label>&nbsp;&nbsp;"
+        "<label style='display:inline;font-weight:400'><input type=radio name=" + pfx + "auth value=key onclick=am('" + pfx + "')> Paste a key</label></div>"
+        "<div id=" + pfx + "fleetbox class=hint>Uses the fleet key shown at the top &mdash; just add that key to the server, nothing to type here.</div>"
+        "<div id=" + pfx + "pwbox style='display:none'><input id=" + pfx + "pw type=password placeholder='root password' autocomplete=off></div>"
         "<div id=" + pfx + "keybox style='display:none'><textarea id=" + pfx + "key placeholder='paste private key'></textarea></div>"
         "<button class=ghost onclick=\"testc('" + pfx + "')\" style='margin-top:.5rem'>Test connection</button>"
         "<div id=" + pfx + "res class=tres></div></div>")
@@ -210,6 +229,7 @@ def srv_block(pfx, title, subtitle):
 def page():
     v2, vpn = counts()
     return PAGE.replace("__RELAY__", html.escape(RELAY_IP or "this server")).replace("__V2__", str(v2)).replace("__VPN__", str(vpn)) \
+               .replace("__FLEETPUB__", html.escape(fleet_pub() or "(key not generated yet)")) \
                .replace("__EXITCARD__", srv_block("e", "New foreign (exit) server", "the box abroad that customers egress through")) \
                .replace("__RELAYCARD__", srv_block("r", "New Iran (relay) server", "the domestic box customers connect to; after install, point them at its IP"))
 
@@ -233,6 +253,8 @@ button{cursor:pointer;border:0;border-radius:8px;padding:.55rem 1.1rem;font-size
 </style>
 <h2 style="margin-bottom:.2rem">Fleet provisioning</h2>
 <p style="margin:0 0 .6rem;color:#666;font-size:13px">This dashboard runs on the current Iran relay <code>__RELAY__</code>. Current fleet: <b>__V2__</b> v2ray customers, <b>__VPN__</b> VPN users.</p>
+<div class=card style="background:#eef4ff"><b>Fleet key</b> &mdash; the easiest login. Add this one line to any new server (paste it in your provider's &ldquo;SSH key&rdquo; box when creating it), then pick <b>Fleet key</b> below &mdash; no key to paste, no mismatch.
+<div style="font-family:monospace;font-size:11px;word-break:break-all;background:#fff;border:1px solid #cbd5e1;border-radius:6px;padding:.5rem;margin-top:.4rem">__FLEETPUB__</div></div>
 <div class=card><label style="margin-top:0">What do you want to change?</label>
   <div class=seg>
     <label><input type=radio name=mode value=exit checked onclick=setmode()> Foreign server only</label>
@@ -263,11 +285,13 @@ function setmode(){var m=mode();
   document.getElementById('modehint').textContent=m=='exit'?'Keep the Iran relay, move the exit abroad.':m=='relay'?'Keep the current exit, move the Iran relay.':'Move both servers.';
   refresh();}
 function am(p){var k=document.querySelector('input[name='+p+'auth]:checked').value;
+  document.getElementById(p+'fleetbox').style.display=k=='fleet'?'block':'none';
   document.getElementById(p+'pwbox').style.display=k=='password'?'block':'none';
   document.getElementById(p+'keybox').style.display=k=='key'?'block':'none';}
 function creds(p){var m=document.querySelector('input[name='+p+'auth]:checked').value;
-  return {ip:document.getElementById(p+'ip').value.trim(),user:document.getElementById(p+'user').value.trim()||'root',method:m,secret:m=='password'?document.getElementById(p+'pw').value:document.getElementById(p+'key').value};}
-function testc(p){var c=creds(p);if(!c.ip||!c.secret){alert('Enter the IP and password/key');return;}
+  var sec=m=='password'?document.getElementById(p+'pw').value:m=='key'?document.getElementById(p+'key').value:'fleet';
+  return {ip:document.getElementById(p+'ip').value.trim(),user:document.getElementById(p+'user').value.trim()||'root',method:m,secret:sec};}
+function testc(p){var c=creds(p);if(!c.ip){alert('Enter the server IP');return;}
   var t=document.getElementById(p+'res');t.style.display='block';t.className='tres';t.textContent='Testing...';
   fetch('/test',{method:'POST',body:new URLSearchParams(c)}).then(r=>r.json()).then(j=>{t.className='tres '+(j.ok?'okc':'badc');t.textContent=j.msg;okState[p]=j.ok;refresh();})
   .catch(()=>{t.className='tres badc';t.textContent='Test failed.';okState[p]=false;refresh();});}
