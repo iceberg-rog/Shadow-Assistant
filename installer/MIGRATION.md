@@ -20,7 +20,10 @@ So the state survives even a sudden exit burn. Keep an occasional copy of
 
 ## Changing the EXIT only (most common — exits burn every few days)
 
-1. Build the new exit (Marzban + tunnel-in :9443 + customer inbounds) — `foreign.sh`.
+1. Build the new exit (native uv Marzban + xray 26.3.27 + tunnel-in :9443 +
+   localhost customer inbounds) — `foreign-exit.sh` (also driven by the provisioning
+   dashboard). It generates a fresh tunnel keypair and reuses the fleet's customer
+   REALITY identity, so distributed customer configs keep working across the swap.
 2. Restore the customers with their usage/expiry onto it:
    ```bash
    ROLE=exit BACKUP=fleet-backup.tar.gz RELAY_IP=<relay ip> bash installer/restore-fleet.sh

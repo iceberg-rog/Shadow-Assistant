@@ -57,10 +57,26 @@ def load_key(s):
     raise ValueError("unreadable private key")
 
 FLEET_KEY = "/opt/provision/prov_key"
+# customer VLESS-REALITY identity + panel admin, kept ONLY on the relay (never in git).
+# Passing these to a new exit makes it a seamless clone: existing customer configs keep
+# working across an exit swap (same pbk/sid), and the panel keeps the same admin login.
+FLEET_IDENTITY = "/opt/provision/fleet-identity.env"
 
 def fleet_pub():
     try: return open(FLEET_KEY + ".pub").read().strip()
     except Exception: return ""
+
+def identity_env():
+    out = []
+    try:
+        for ln in open(FLEET_IDENTITY):
+            ln = ln.strip()
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                out.append("%s=%s" % (k.strip(), shq(v.strip())))
+    except Exception:
+        pass
+    return (" ".join(out) + " ") if out else ""
 
 def connect(ip, user, method, secret):
     c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -140,6 +156,8 @@ def run_installer(c, method, secret, path, env):
         if ln.startswith("FLEET_RESULT="):
             try: keys = json.loads(ln.split("=", 1)[1])
             except Exception: pass
+    # installers may emit tun_uuid/tun_pub/tun_sid; the rest of the flow expects uuid/pub/sid
+    keys = {(k[4:] if k.startswith("tun_") else k): v for k, v in keys.items()}
     return chan.recv_exit_status(), keys
 
 def upload(c, migrate):
@@ -159,9 +177,9 @@ def orchestrate(mode, ex, re, opts):
             ce = connect(ex["ip"], ex["user"], ex["method"], ex["secret"])
             upload(ce, opts.get("migrate"))
             setp(14, "exit", "Building the exit (Marzban%s%s) ..." % (" + L2TP" if opts.get("l2tp") else "", " + users" if opts.get("migrate") else ""))
-            env = "RELAY_IP=%s WITH_L2TP=%s MIGRATE=%s" % (RELAY_IP, "1" if opts.get("l2tp") else "0", "1" if opts.get("migrate") else "0")
+            env = "%sRELAY_IP=%s WITH_L2TP=%s MIGRATE=%s" % (identity_env(), RELAY_IP, "1" if opts.get("l2tp") else "0", "1" if opts.get("migrate") else "0")
             rc, keys = run_installer(ce, ex["method"], ex["secret"], "/tmp/foreign-exit.sh", env); ce.close()
-            if rc != 0 or not keys.get("tun_uuid"):
+            if rc != 0 or not keys.get("uuid"):
                 setp(JOB["percent"], "error", "Exit installer failed (rc=%s)." % rc, done=True, running=False, success=False, result="Exit build did not finish on %s." % ex["ip"]); return
             newexit = {"ip": ex["ip"], **keys}
         target_exit = newexit or current_exit()
@@ -169,8 +187,8 @@ def orchestrate(mode, ex, re, opts):
             setp(JOB["percent"], "error", "No exit tunnel params.", done=True, running=False, success=False, result="Could not determine the exit to point at."); return
 
         if mode == "exit":
-            setp(80, "repoint", "Pointing THIS relay at the new exit ...")
             dry = "DRYRUN=1 " if opts.get("test") else ""
+            setp(80, "repoint", "Dry run: exit built + verified, NOT moving customers ..." if dry else "Pointing THIS relay at the new exit ...")
             rp = subprocess.run("%sEXIT_IP=%s TUN_UUID=%s TUN_PUB=%s TUN_SID=%s bash /opt/provision/repoint-exit.sh 2>&1" % (
                 dry, target_exit["ip"], target_exit["uuid"], target_exit["pub"], target_exit["sid"]), shell=True, capture_output=True, text=True, timeout=120)
             for ln in (rp.stdout or "").splitlines(): setp(None, None, ln)
@@ -190,8 +208,12 @@ def orchestrate(mode, ex, re, opts):
         setp(92, "validate", "Validating ...")
         v2, vpn = counts()
         if mode == "exit":
-            ok, egress = ((True, validate()[1]) if opts.get("test") else validate(target_exit["ip"]))
-            res = "New exit %s is live. %d v2ray + %d VPN accounts kept their usage & days. Egress = %s." % (target_exit["ip"], v2, vpn, egress) if ok else "Installed + repointed to %s, but egress not confirmed." % target_exit["ip"]
+            if opts.get("test"):
+                ok = True
+                res = "Dry run OK. New exit %s is BUILT & verified and carries all %d v2ray + %d VPN accounts (usage & days kept) — but customers are still on the current exit. Uncheck 'Dry run' and Install again to switch them over." % (target_exit["ip"], v2, vpn)
+            else:
+                ok, egress = validate(target_exit["ip"])
+                res = "New exit %s is LIVE. %d v2ray + %d VPN accounts kept their usage & days. Egress = %s." % (target_exit["ip"], v2, vpn, egress) if ok else "Installed + repointed to %s, but egress not confirmed." % target_exit["ip"]
         elif mode == "relay":
             ok = True; res = "New relay %s is ready with all %d v2ray + %d VPN accounts (usage & days kept). Point your customers/DNS at %s." % (re["ip"], v2, vpn, re["ip"], re["ip"])
         else:
@@ -274,6 +296,8 @@ button{cursor:pointer;border:0;border-radius:8px;padding:.55rem 1.1rem;font-size
   <div style="font-size:14px"><label style="font-weight:400"><input type=checkbox id=l2tp checked> L2TP / IPsec</label></div>
   <div style="font-size:14px"><label style="font-weight:400"><input type=checkbox id=migrate checked> Migrate accounts</label>
     <small style="color:#777;display:block;margin-left:1.4rem">copies <b>__V2__</b> v2ray + <b>__VPN__</b> VPN users with used data &amp; remaining days. Uncheck to start empty.</small></div>
+  <div style="font-size:14px;margin-top:.35rem"><label style="font-weight:400"><input type=checkbox id=dryrun checked> Dry run &mdash; build &amp; verify only, <b>don't move live customers yet</b></label>
+    <small style="color:#777;display:block;margin-left:1.4rem">Recommended for a test: builds the new exit but keeps everyone on the current one. Uncheck only when you want this exit to go <b>live</b> (all customers switch to it).</small></div>
   <button class=primary id=go onclick=start() disabled>Install &mdash; test the connection(s) first</button>
 </div>
 <div id=prog style="display:none"><div id=bar><div id=fill>0%</div></div><div id=step style="font-size:13px;color:#444"></div><div id=log></div></div>
@@ -306,6 +330,7 @@ function refresh(){var ok=need().every(p=>okState[p]);var g=document.getElementB
 function start(){var b=new URLSearchParams();b.set('mode',mode());
   need().forEach(p=>{var c=creds(p);b.set(p+'ip',c.ip);b.set(p+'user',c.user);b.set(p+'method',c.method);b.set(p+'secret',c.secret);});
   b.set('l2tp',document.getElementById('l2tp').checked?1:0);b.set('migrate',document.getElementById('migrate').checked?1:0);
+  b.set('test',document.getElementById('dryrun').checked?1:0);
   document.getElementById('go').disabled=true;document.getElementById('prog').style.display='block';document.getElementById('log').style.display='block';
   fetch('/start',{method:'POST',body:b}).then(poll);}
 function poll(){fetch('/status').then(r=>r.json()).then(j=>{var f=document.getElementById('fill');f.style.width=j.percent+'%';f.textContent=j.percent+'%';
