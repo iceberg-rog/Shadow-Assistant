@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import http.server, ssl, subprocess, os, re, json, base64, urllib.parse, html, datetime, fcntl
+import http.server, ssl, subprocess, os, re, json, base64, urllib.parse, html, datetime, fcntl, io, tarfile
 USER=os.environ.get("PANEL_USER","admin"); PASS=os.environ.get("PANEL_PASS","changeme")
 SERVER_IP=os.environ.get("SERVER_IP","YOUR_RELAY_IP")
 USERS="/opt/ovpnpanel/users.json"; CHAP="/etc/ppp/chap-secrets"
@@ -82,6 +82,19 @@ class H(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type","application/x-openvpn-profile")
             self.send_header("Content-Disposition",'attachment; filename="fleet-ovpn.ovpn"')
             self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b); return
+        if u.path=="/backup":
+            # full fleet state: live VPN users.json + latest Marzban DB (pushed by the exit)
+            buf=io.BytesIO()
+            with tarfile.open(fileobj=buf,mode="w:gz") as t:
+                for arc,p in (("users.json","/opt/ovpnpanel/users.json"),
+                              ("marzban-db.sqlite3","/opt/fleet-backups/marzban-db.sqlite3")):
+                    if os.path.exists(p):
+                        try: t.add(p,arcname=arc)
+                        except Exception: pass
+            data=buf.getvalue()
+            self.send_response(200); self.send_header("Content-Type","application/gzip")
+            self.send_header("Content-Disposition",'attachment; filename="fleet-backup.tar.gz"')
+            self.send_header("Content-Length",str(len(data))); self.end_headers(); self.wfile.write(data); return
         self.page()
     def do_POST(self):
         if not self.ok_auth(): return
@@ -152,7 +165,10 @@ class H(http.server.BaseHTTPRequestHandler):
         "<table><tr><th>username</th><th>password</th><th>expires</th><th>data used</th><th>status</th><th>actions</th></tr>"+rows+"</table>"
         "<h3>How clients connect</h3>"
         "<div class=box><b>OpenVPN:</b> download <a href=/ovpn>fleet-ovpn.ovpn</a> (same file for everyone) &rarr; import in any OpenVPN app &rarr; it asks for <b>username + password</b> from the table above.</div>"
-        "<div class=box><b>L2TP/IPsec:</b> Server <code>"+SERVER_IP+"</code> &middot; Pre-shared key <code>"+html.escape(get_psk())+"</code> &middot; username + password from the table.</div>")
+        "<div class=box><b>L2TP/IPsec:</b> Server <code>"+SERVER_IP+"</code> &middot; Pre-shared key <code>"+html.escape(get_psk())+"</code> &middot; username + password from the table.</div>"
+        "<h3>Backup &amp; migration</h3>"
+        "<div class=box>All accounts (VPN + v2ray) with their <b>used data</b> and <b>remaining days</b> are backed up automatically. "
+        "<a href=/backup><b>&#11015; Download fleet backup</b></a> &mdash; one file to restore everything on new servers.</div>")
         b=body.encode()
         self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self,*a): pass
