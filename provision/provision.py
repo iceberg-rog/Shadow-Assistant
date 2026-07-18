@@ -46,10 +46,15 @@ def current_exit():
 def shq(s): return "'" + s.replace("'", "'\\''") + "'"
 
 def load_key(s):
+    s = (s or "").strip()
+    if s and "-----BEGIN" not in s:
+        # bare base64 body pasted (no header lines) -> rewrap as an OpenSSH key
+        body = "".join(s.split())
+        s = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + "\n".join(body[i:i+70] for i in range(0, len(body), 70)) + "\n-----END OPENSSH PRIVATE KEY-----\n"
     for K in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
         try: return K.from_private_key(io.StringIO(s))
         except Exception: pass
-    raise ValueError("could not read the private key (ed25519/rsa/ecdsa, OpenSSH or PEM)")
+    raise ValueError("unreadable private key")
 
 def connect(ip, user, method, secret):
     c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -78,8 +83,11 @@ def probe(c, method, secret):
 def test_one(ip, user, method, secret):
     if not ip or not secret: return {"ok": False, "msg": "Enter the IP and the password/key."}
     if paramiko is None: return {"ok": False, "msg": "paramiko missing on the relay."}
+    if method == "key":
+        try: load_key(secret)
+        except Exception: return {"ok": False, "msg": "That private key can't be read. Paste the WHOLE key file (the -----BEGIN...----- and -----END...----- lines and everything between)."}
     try: c = connect(ip, user, method, secret)
-    except paramiko.AuthenticationException: return {"ok": False, "msg": "Login failed. Wrong username/password, or this server only allows SSH keys."}
+    except paramiko.AuthenticationException: return {"ok": False, "msg": "Login failed. The key/password was refused by %s (wrong user, or the key isn't authorized there)." % ip}
     except Exception as e: return {"ok": False, "msg": "Cannot reach %s: %s" % (ip, e)}
     try:
         is_root, can_sudo, _, how = probe(c, method, secret)
