@@ -157,6 +157,13 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self,*a): pass
 
-httpd=http.server.ThreadingHTTPServer(("0.0.0.0",int(os.environ.get("PANEL_PORT","2098"))),H)
-ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain("/opt/ovpnpanel/cert.pem","/opt/ovpnpanel/key.pem")
-httpd.socket=ctx.wrap_socket(httpd.socket,server_side=True); httpd.serve_forever()
+_CTX=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); _CTX.load_cert_chain("/opt/ovpnpanel/cert.pem","/opt/ovpnpanel/key.pem")
+class PanelServer(http.server.ThreadingHTTPServer):
+    daemon_threads=True; allow_reuse_address=True
+    def get_request(self):
+        # accept plain, then wrap with TLS but DEFER the handshake to the worker
+        # thread (never in accept()) so a bad/half-open connection can't freeze the panel
+        s,a=self.socket.accept(); s.settimeout(25)
+        return _CTX.wrap_socket(s,server_side=True,do_handshake_on_connect=False),a
+    def handle_error(self,request,client_address): pass
+PanelServer(("0.0.0.0",int(os.environ.get("PANEL_PORT","2098"))),H).serve_forever()
