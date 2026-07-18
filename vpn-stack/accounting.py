@@ -27,12 +27,21 @@ def sample():
     try:
         inblk=False
         for ln in open(OVPN_STATUS).read().splitlines():
-            if ln.startswith("Common Name,"): inblk=True; continue
-            if ln.startswith("ROUTING TABLE") or ln.startswith("GLOBAL"): inblk=False
-            if inblk and "," in ln:
+            if ln.startswith("CLIENT_LIST,"):
+                # OpenVPN 2.4+ machine format: CLIENT_LIST,CN,Real,Virtual,Virtual6,BytesRecv,BytesSent,...
+                p=ln.split(",")
+                if len(p)>=7 and p[1] and p[1]!="UNDEF":
+                    try: out["ovpn:"+p[1]]=(p[1], int(p[5])+int(p[6]))
+                    except Exception: pass
+            elif ln.startswith("Common Name,"):
+                inblk=True
+            elif ln.startswith("ROUTING TABLE") or ln.startswith("GLOBAL"):
+                inblk=False
+            elif inblk and "," in ln:
+                # legacy v1 format: CN,Real,BytesRecv,BytesSent,Since
                 p=ln.split(",")
                 if len(p)>=4 and p[0] and p[0]!="UNDEF":
-                    try: out["ovpn:"+p[0]]=(p[0],int(p[2])+int(p[3]))
+                    try: out["ovpn:"+p[0]]=(p[0], int(p[2])+int(p[3]))
                     except Exception: pass
     except Exception: pass
     try:
