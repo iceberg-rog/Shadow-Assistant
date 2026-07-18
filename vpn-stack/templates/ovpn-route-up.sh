@@ -17,3 +17,9 @@ done
 # keep forwarder + socks off the public internet
 iptables -C INPUT -i $DEV -p tcp --dport 12345 -j DROP 2>/dev/null || iptables -A INPUT -i $DEV -p tcp --dport 12345 -j DROP
 iptables -C INPUT -i $DEV -p tcp --dport 11080 -j DROP 2>/dev/null || iptables -A INPUT -i $DEV -p tcp --dport 11080 -j DROP
+# force all VPN DNS through the local tunnel-resolver (no Iran DNS leak)
+iptables -t nat -C PREROUTING -s 10.8.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.8.0.1 2>/dev/null || iptables -t nat -A PREROUTING -s 10.8.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.8.0.1
+iptables -t nat -C PREROUTING -s 10.10.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.10.0.1 2>/dev/null || iptables -t nat -A PREROUTING -s 10.10.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.10.0.1
+# clamp MSS to path MTU on the VPN interfaces (avoids large-packet drops)
+iptables -t mangle -C POSTROUTING -o tun0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A POSTROUTING -o tun0 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+iptables -t mangle -C POSTROUTING -o ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || iptables -t mangle -A POSTROUTING -o ppp+ -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu

@@ -26,6 +26,13 @@ client ──L2TP/IPsec(500/4500/1701)──┤→ relay ──iptables REDIRECT
 - **`tcp2socks.py`** — tiny transparent TCP→SOCKS forwarder (reads `SO_ORIGINAL_DST`).
   Used instead of xray dokodemo/TPROXY because some kernels reject `IP_TRANSPARENT`,
   and instead of redsocks (broken libevent on Ubuntu 26.04).
+- **`dns2socks.py` + dnsmasq** — DNS through the tunnel. Iran poisons UDP DNS
+  (`youtube.com`/`instagram.com` → `10.10.34.x` sinkhole) even to 1.1.1.1/8.8.8.8, so a
+  VPN that egresses abroad but resolves DNS locally only opens hardcoded-IP apps
+  (Telegram). Fix: dnsmasq answers on the VPN gateways (`10.8.0.1`/`10.10.0.1`, pushed to
+  clients) and forwards to `dns2socks` (`127.0.0.1:5300`), which sends each query as
+  DNS-over-TCP through the SOCKS/tunnel to resolve at the foreign exit. `TCPMSS` clamping
+  on the VPN interfaces avoids large-packet drops.
 - **`ovpn-auth.py`** — OpenVPN `auth-user-pass-verify` script; validates against `users.json`
   (password, enabled, not expired, under quota).
 - **`accounting.py`** — polls the OpenVPN status log + L2TP `ppp*` counters every 10s,

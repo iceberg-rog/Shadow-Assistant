@@ -41,13 +41,14 @@ echo ">> VPN stack: relay $RELAY_IP -> exit $EXIT_IP"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq openvpn easy-rsa strongswan strongswan-starter libcharon-extra-plugins \
-                      xl2tpd ppp openssl curl python3 iptables >/dev/null
+                      xl2tpd ppp openssl curl python3 iptables dnsmasq >/dev/null
 command -v /usr/local/bin/xray >/dev/null || { echo "ERROR: xray missing — run installer/iran.sh first"; exit 1; }
 [ -c /dev/net/tun ] || { echo "ERROR: /dev/net/tun missing (need KVM, not OpenVZ)"; exit 1; }
 
 # --- 2) component files ---
 mkdir -p /opt/ovpnpanel /usr/local/sbin /usr/local/etc/xray /run/l2tp-map /etc/openvpn/server
 install -m755 "$DIR/tcp2socks.py"  /usr/local/sbin/tcp2socks.py
+install -m755 "$DIR/dns2socks.py"  /opt/ovpnpanel/dns2socks.py
 install -m755 "$DIR/ovpn-auth.py"  /opt/ovpnpanel/ovpn-auth.py
 install -m755 "$DIR/accounting.py" /opt/ovpnpanel/accounting.py
 install -m644 "$DIR/panel.py"      /opt/ovpnpanel/panel.py
@@ -75,6 +76,21 @@ subst "$DIR/templates/config-ovpn.json" > /usr/local/etc/xray/config-ovpn.json
 # --- 5) tcp2socks + routing (10.8.0.0/24 OpenVPN, 10.10.0.0/24 L2TP -> tunnel) ---
 subst "$DIR/templates/ovpn-route-up.sh" > /usr/local/sbin/ovpn-route-up.sh
 chmod +x /usr/local/sbin/ovpn-route-up.sh
+
+# --- 5b) DNS through the tunnel (avoid Iran's 10.10.34.x DNS poisoning) ---
+# dnsmasq answers on the VPN gateways and forwards to dns2socks, which resolves
+# via the fleet tunnel at the foreign exit. VPN clients are pushed the gateway as DNS.
+PUBDEV="$(ip route show default | awk '{print $5; exit}')"
+cat > /etc/dnsmasq.d/vpn-tunnel-dns.conf <<EOF
+port=53
+no-resolv
+no-hosts
+bind-dynamic
+except-interface=$PUBDEV
+except-interface=lo
+server=127.0.0.1#5300
+cache-size=1000
+EOF
 
 # --- 6) L2TP / IPsec ---
 subst "$DIR/templates/ipsec.conf" > /etc/ipsec.conf
@@ -136,6 +152,18 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+cat > /etc/systemd/system/dns2socks.service <<EOF
+[Unit]
+Description=DNS-over-tunnel resolver (UDP -> socks TCP-DNS -> exit)
+After=network.target xray-ovpn.service
+Wants=xray-ovpn.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/ovpnpanel/dns2socks.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
 cat > /etc/systemd/system/ovpn-route.service <<EOF
 [Unit]
 Description=VPN egress routing (tcp2socks + nat)
@@ -177,9 +205,10 @@ EOF
 
 # --- 10) enable + start ---
 systemctl daemon-reload
-systemctl enable --now openvpn-server@server xray-ovpn tcp2socks vpn-accounting ovpn-panel >/dev/null 2>&1
+systemctl enable --now openvpn-server@server xray-ovpn tcp2socks dns2socks vpn-accounting ovpn-panel >/dev/null 2>&1
 systemctl enable strongswan-starter xl2tpd >/dev/null 2>&1
 systemctl restart strongswan-starter xl2tpd
+systemctl restart dnsmasq
 systemctl start ovpn-route
 sleep 2
 
