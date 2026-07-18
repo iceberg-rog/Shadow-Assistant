@@ -24,7 +24,7 @@
 # ==========================================================================
 set -euo pipefail
 
-RELAY_IP="${RELAY_IP:?set RELAY_IP=this server's public IP}"
+RELAY_IP="${RELAY_IP:?set RELAY_IP=the relay public IP}"
 EXIT_IP="${EXIT_IP:?set EXIT_IP=the foreign exit IP}"
 TUN_UUID="${TUN_UUID:?set TUN_UUID (tunnel client uuid, from the exit)}"
 TUN_PUB="${TUN_PUB:?set TUN_PUB (tunnel REALITY public key, from the exit)}"
@@ -42,7 +42,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq openvpn easy-rsa strongswan strongswan-starter libcharon-extra-plugins \
                       xl2tpd ppp openssl curl python3 iptables dnsmasq >/dev/null
-command -v /usr/local/bin/xray >/dev/null || { echo "ERROR: xray missing — run installer/iran.sh first"; exit 1; }
+command -v /usr/local/bin/xray >/dev/null || { echo "ERROR: xray missing -- run installer/iran.sh first"; exit 1; }
 [ -c /dev/net/tun ] || { echo "ERROR: /dev/net/tun missing (need KVM, not OpenVZ)"; exit 1; }
 
 # --- 2) component files ---
