@@ -24,6 +24,7 @@ DRYRUN="${DRYRUN:-0}"
 
 RELAY_CFG=/usr/local/etc/xray/config.json
 OVPN_CFG=/usr/local/etc/xray/config-ovpn.json
+ALT_CFG=/usr/local/etc/xray/config-alt.json   # alt customer ports (2053/2083/2052/8880)
 
 getaddr(){ python3 -c "import json,sys
 try:c=json.load(open(sys.argv[1]))
@@ -59,6 +60,7 @@ fi
 
 repoint_tunnel "$RELAY_CFG"
 repoint_tunnel "$OVPN_CFG"
+repoint_tunnel "$ALT_CFG"
 if [ -f /usr/local/bin/sub-forward.py ]; then
   sed -i -E "s/TARGET[[:space:]]*=[[:space:]]*\([^)]*\)/TARGET=('$EXIT_IP',$SUB_PORT)/" /usr/local/bin/sub-forward.py && echo "  updated sub-forward -> $EXIT_IP:$SUB_PORT"
 fi
@@ -69,9 +71,11 @@ fi
 echo ">> validating configs"
 /usr/local/bin/xray -test -c "$RELAY_CFG" >/dev/null && echo "  relay config OK"
 [ -f "$OVPN_CFG" ] && { /usr/local/bin/xray -test -c "$OVPN_CFG" >/dev/null && echo "  vpn-stack config OK"; }
+[ -f "$ALT_CFG" ] && { /usr/local/bin/xray -test -c "$ALT_CFG" >/dev/null && echo "  alt-ports config OK"; }
 
 echo ">> restarting (old exit is dead anyway; clients auto-reconnect to the new exit)"
 systemctl restart xray-relay
+systemctl restart xray-relay-alt 2>/dev/null || true
 systemctl restart sub-forward 2>/dev/null || true
 systemctl restart xray-ovpn 2>/dev/null || true
 [ -f /usr/local/sbin/ovpn-route-up.sh ] && bash /usr/local/sbin/ovpn-route-up.sh 2>/dev/null || true
