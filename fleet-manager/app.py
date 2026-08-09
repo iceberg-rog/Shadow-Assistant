@@ -4,9 +4,11 @@ Double-click it: a small local web app opens in your browser. Nothing is exposed
 to the internet (it binds 127.0.0.1 only). All state lives in fleet.db beside
 the exe, so accounts survive any server being replaced.
 """
-import os, sys, json, time, threading, webbrowser, datetime, urllib.parse, urllib.request, http.server, socketserver, socket
+import os, sys, json, time, threading, webbrowser, datetime, subprocess, urllib.parse, urllib.request, http.server, socketserver, socket
 import core, engine
 from core import q, x, now, today
+
+VERSION = "1.3"      # bumped on every build handed out - drives the upgrade takeover
 
 # Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
 # hatch for the rare case where 8770 belongs to some other program.
@@ -80,7 +82,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 .chk{display:flex;align-items:center;gap:6px;font-size:13px;padding:3px 0}
 </style>
 <div class=wrap>
-<h1>Fleet Manager</h1>
+<h1>Fleet Manager <span id=ver class=mini style="font-size:12px;color:var(--mut);font-weight:400"></span></h1>
 <div class=sub>Provision, migrate and monitor your VPN servers
  &nbsp;&middot;&nbsp; <span id=syncdot style="color:var(--mut)">&#9679;</span> <span id=syncmsg class=mini>connecting...</span></div>
 <div class=tabs>
@@ -108,6 +110,7 @@ function load(){api('/api/state').then(s=>{S=s;render();});}
 function esc(x){return (x===null||x===undefined)?'':String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function render(){
   var sy=S.sync||{};
+  var vv=document.getElementById('ver'); if(vv)vv.textContent='v'+(S.version||'?');
   var d=document.getElementById('syncdot'), m=document.getElementById('syncmsg');
   if(d){d.style.color=sy.ok?'var(--ok)':'var(--warn)';
         m.textContent=(sy.msg||'')+(sy.ts?(' \\u00b7 '+sy.ts.replace('T',' ').slice(5)):'');}
@@ -330,12 +333,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b)
         elif p == "/api/ping":
-            b = b"fleet-manager"
+            b = ("fleet-manager %s" % VERSION).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
             self.wfile.write(b)
+        elif p == "/api/quit":
+            # a NEWER copy asking this one to step aside (loopback only)
+            b = b"bye"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            threading.Thread(target=lambda: (time.sleep(0.4), os._exit(0)), daemon=True).start()
         elif p == "/api/state":
             self._json(state())
         elif p == "/api/job":
@@ -480,7 +491,7 @@ def state():
         "chart": chart, "chart_max_h": fmt_bytes(max([p["v"] for p in chart], default=0)),
         "events": q("SELECT * FROM events ORDER BY id DESC LIMIT 12"),
         "key_cmd": core.key_install_command(),
-        "sync": dict(SYNC),
+        "sync": dict(SYNC), "version": VERSION,
         "kpi": {"servers": len(servers), "services": len(services),
                 "users": len(users), "total_h": fmt_bytes(total_all), "live": live_all},
     }
@@ -531,6 +542,16 @@ def already_running():
     VPN app sets one) would send even a 127.0.0.1 request through the proxy and
     make this always look 'not running'.
     """
+    return running_version() is not None
+
+
+def running_version():
+    """Version string of a Fleet Manager already holding the port, else None.
+
+    Deliberately a raw socket, NOT urllib: Windows proxy settings (the user's own
+    VPN app sets one) would send even a 127.0.0.1 request through the proxy and
+    make this always report 'nothing running'.
+    """
     s = socket.socket()
     s.settimeout(3)
     try:
@@ -544,11 +565,62 @@ def already_running():
             data += chunk
             if b"fleet-manager" in data:
                 break
-        return b"fleet-manager" in data
+        if b"fleet-manager" not in data:
+            return None
+        tail = data.split(b"fleet-manager", 1)[1].strip().decode("ascii", "ignore")
+        return tail.split()[0] if tail else "0"   # pre-1.3 builds sent no version
     except Exception:
-        return False
+        return None
     finally:
         s.close()
+
+
+def ask_old_copy_to_quit():
+    """An older build left running in the background (it has no window) would
+    otherwise swallow every launch of the new one - the operator double-clicks the
+    new exe and just gets the OLD app's page back. Tell it to exit and take over."""
+    s = socket.socket()
+    s.settimeout(3)
+    try:
+        s.connect(("127.0.0.1", PORT))
+        s.sendall(b"GET /api/quit HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        s.recv(256)
+    except Exception:
+        pass
+    finally:
+        s.close()
+    for _ in range(12):          # wait for the port to come free
+        time.sleep(0.5)
+        if running_version() is None:
+            return True
+    # Builds before 1.3 have no /api/quit, so they ignore the polite request and
+    # would keep swallowing every launch of the new exe. Close the process that
+    # owns the port instead - targeted by PID, never by image name, so this copy
+    # (and its bootloader parent) can't kill itself.
+    return _kill_port_owner()
+
+
+def _kill_port_owner():
+    try:
+        mine = {str(os.getpid()), str(os.getppid())}
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
+                             creationflags=0x08000000).stdout
+        pids = set()
+        for ln in out.splitlines():
+            parts = ln.split()
+            if len(parts) >= 5 and parts[0] == "TCP" and parts[1].endswith(":%d" % PORT) \
+               and parts[3].upper() == "LISTENING":
+                pids.add(parts[4])
+        for pid in pids - mine:
+            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True,
+                           creationflags=0x08000000)
+        for _ in range(16):
+            time.sleep(0.5)
+            if running_version() is None:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def seed_db_if_first_run():
@@ -572,9 +644,17 @@ APP_DIR_LOCAL = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "
 
 def main():
     url = "http://127.0.0.1:%d/" % PORT
-    if already_running():
-        webbrowser.open(url)
-        return
+    other = running_version()
+    if other is not None:
+        if other == VERSION:
+            webbrowser.open(url)          # same build already up - just show it
+            return
+        # an older (or different) build is squatting the port; retire it so the
+        # operator actually gets the exe they just double-clicked
+        if not ask_old_copy_to_quit():
+            _fatal("An older Fleet Manager (version %s) is still running and will not close.\n"
+                   "Open Task Manager, end 'FleetManager.exe', then start this one again." % other)
+            return
     seeded = seed_db_if_first_run()
     core.init_db()
     core.ensure_key()
