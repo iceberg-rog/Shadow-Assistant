@@ -199,8 +199,12 @@ def push_users(srv, service_id):
         }
     with SSH(srv["ip"], srv["ssh_user"], srv["auth_method"], srv["secret"]) as s:
         s.run("mkdir -p /opt/ovpnpanel")
-        s.put_text(json.dumps(blob, indent=2), "/opt/ovpnpanel/users.json", mode=0o600)
-        s.run("rm -f /run/vpn-acct-last.json; systemctl restart vpn-accounting ovpn-panel 2>/dev/null; true")
+        s.put_text(json.dumps(blob, indent=2), "/opt/ovpnpanel/users.json", mode=0o640)
+        # OpenVPN's auth script runs as "nobody" after the privilege drop, so the
+        # store must be group-readable or every login fails (AUTH_FAILED).
+        s.run("chgrp nogroup /opt/ovpnpanel/users.json 2>/dev/null; chmod 640 /opt/ovpnpanel/users.json; "
+              "chmod 755 /opt/ovpnpanel; "
+              "rm -f /run/vpn-acct-last.json; systemctl restart vpn-accounting ovpn-panel 2>/dev/null; true")
     return len(blob)
 
 

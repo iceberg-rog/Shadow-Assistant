@@ -16,6 +16,18 @@ def load_locked(f):
     except Exception: return {}
 def save_locked(f,d):
     f.seek(0); f.truncate(); f.write(json.dumps(d,indent=2)); f.flush()
+    keep_readable()
+
+def keep_readable():
+    # OpenVPN's auth script runs as "nobody" (after privilege drop), so the store
+    # must stay group-readable or every login fails. Never world-readable.
+    try:
+        import grp
+        os.chown(USERS, 0, grp.getgrnam("nogroup").gr_gid)
+    except Exception:
+        pass
+    try: os.chmod(USERS, 0o640)
+    except Exception: pass
 def load():
     try: return json.load(open(USERS))
     except Exception: return {}

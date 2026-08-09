@@ -53,6 +53,13 @@ install -m755 "$DIR/ovpn-auth.py"  /opt/ovpnpanel/ovpn-auth.py
 install -m755 "$DIR/accounting.py" /opt/ovpnpanel/accounting.py
 install -m644 "$DIR/panel.py"      /opt/ovpnpanel/panel.py
 [ -f /opt/ovpnpanel/users.json ] || echo '{}' > /opt/ovpnpanel/users.json
+# OpenVPN drops to user "nobody", and auth-user-pass-verify runs AFTER that drop,
+# so the auth script must be able to read the user store or every login fails with
+# "external program exited with error status: 1". Give the store group-read for
+# nogroup (root still owns it; nobody can read, never write).
+chgrp nogroup /opt/ovpnpanel/users.json 2>/dev/null || true
+chmod 640 /opt/ovpnpanel/users.json
+chmod 755 /opt/ovpnpanel
 
 subst(){ sed -e "s|__EXIT_IP__|$EXIT_IP|g; s|__RELAY_IP__|$RELAY_IP|g; s|__TUN_UUID__|$TUN_UUID|g; s|__TUN_PUB__|$TUN_PUB|g; s|__TUN_SID__|$TUN_SID|g" "$1"; }
 

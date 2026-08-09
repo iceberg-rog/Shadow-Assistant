@@ -12,12 +12,23 @@ def save_last(d):
     try: json.dump(d, open(LAST_FILE,"w"))
     except Exception: pass
 
+def keep_readable():
+    # OpenVPN's auth script runs as "nobody"; the store must stay group-readable
+    # or every login fails with "external program exited with error status: 1".
+    try:
+        import grp
+        os.chown(USERS, 0, grp.getgrnam("nogroup").gr_gid)
+    except Exception: pass
+    try: os.chmod(USERS, 0o640)
+    except Exception: pass
+
 def _rmw(fn):
     f=open(USERS,"a+"); fcntl.flock(f,fcntl.LOCK_EX)
     try:
         f.seek(0); s=f.read(); users=json.loads(s) if s.strip() else {}
         fn(users)
         f.seek(0); f.truncate(); f.write(json.dumps(users,indent=2)); f.flush()
+        keep_readable()
         return users
     finally:
         fcntl.flock(f,fcntl.LOCK_UN); f.close()
