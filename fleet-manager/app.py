@@ -4,11 +4,11 @@ Double-click it: a small local web app opens in your browser. Nothing is exposed
 to the internet (it binds 127.0.0.1 only). All state lives in fleet.db beside
 the exe, so accounts survive any server being replaced.
 """
-import os, sys, json, time, threading, webbrowser, datetime, urllib.parse, http.server, socketserver, socket
+import os, sys, json, time, threading, webbrowser, datetime, urllib.parse, urllib.request, http.server, socketserver, socket
 import core, engine
 from core import q, x, now, today
 
-PORT_RANGE = range(8770, 8800)
+PORT = 8770          # fixed on purpose: one app, one port, one database
 
 
 # --------------------------------------------------------------- helpers
@@ -125,7 +125,13 @@ function dash(){
      +'<td>'+s.user_count+'</td><td>'+esc(s.total_h)+'</td>'
      +'<td><span class="tag '+(s.status=='live'?'t-ok':'t-bad')+'">'+esc(s.status)+'</span></td>'
      +'<td><button class=ghost onclick="refresh('+s.id+')">refresh</button> '
-     +(s.panel?'<a href="'+esc(s.panel)+'" target=_blank><button class=ghost>panel</button></a>':'')+'</td></tr>';
+     +(s.panel?'<a href="'+esc(s.panel)+'" target=_blank><button class=ghost>panel</button></a> ':'')
+     +'<a href="/api/ovpn?service='+s.id+'"><button class=ghost>.ovpn</button></a></td></tr>';
+    h+='<tr><td colspan=7 class=mini style=padding-top:0>'
+     +'&nbsp;&nbsp;OpenVPN: <span class=mono>'+esc(s.iran_ip)+':1194</span>'
+     +(s.panel_user?' &nbsp;&middot;&nbsp; panel login: <span class=mono>'+esc(s.panel_user)+' / '+esc(s.panel_pass)+'</span>':'')
+     +(s.l2tp_psk?' &nbsp;&middot;&nbsp; L2TP PSK: <span class=mono>'+esc(s.l2tp_psk)+'</span>':'')
+     +'</td></tr>';
   });
   if(!(S.services||[]).length)h+='<tr><td colspan=7 class=mini>No service yet &mdash; use <b>New service</b>.</td></tr>';
   h+='</table></div>';
@@ -308,10 +314,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(b)))
             self.end_headers()
             self.wfile.write(b)
+        elif p == "/api/ping":
+            b = b"fleet-manager"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
         elif p == "/api/state":
             self._json(state())
         elif p == "/api/job":
             self._json(engine.jsnapshot())
+        elif p == "/api/ovpn":
+            # fetch the shared client profile off the Iran server so support can
+            # hand it to a customer without ever opening an SSH session
+            try:
+                sid = int(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("service", ["0"])[0])
+                svc = q("SELECT * FROM services WHERE id=?", (sid,), one=True)
+                iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
+                with core.SSH(iran["ip"], iran["ssh_user"], iran["auth_method"], iran["secret"]) as s:
+                    pu = iran.get("panel_user") or "admin"
+                    pp = iran.get("panel_pass") or ""
+                    port = iran.get("panel_port") or 2098
+                    prof = s.run("curl -sk -u '%s:%s' https://127.0.0.1:%s/ovpn" % (pu, pp, port), timeout=40)
+                if not prof or "remote" not in prof:
+                    raise RuntimeError("could not read the profile from the server")
+                b = prof.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-openvpn-profile")
+                self.send_header("Content-Disposition", 'attachment; filename="%s.ovpn"' % iran["ip"])
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+            except Exception as e:
+                b = ("could not fetch the .ovpn: %s" % e).encode()
+                self.send_response(500)
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
         else:
             self.send_response(404)
             self.end_headers()
@@ -407,6 +447,8 @@ def state():
         services.append(dict(s, iran_ip=iran.get("ip"), foreign_ip=fgn.get("ip"),
                              user_count=len(us), total_h=fmt_bytes(tot),
                              live=(last or {}).get("live_conns", 0),
+                             panel_user=iran.get("panel_user"), panel_pass=iran.get("panel_pass"),
+                             l2tp_psk=iran.get("l2tp_psk"),
                              panel=("https://%s:%s/" % (iran.get("ip"), iran.get("panel_port") or 2098))
                                    if iran.get("panel_port") else ""))
     users = []
@@ -442,27 +484,75 @@ def auto_refresh_loop():
             pass
 
 
-def free_port():
-    for p in PORT_RANGE:
-        s = socket.socket()
+def already_running():
+    """True if our app already holds the port - then we just open the browser
+    again instead of starting a second copy with a second database.
+
+    Deliberately a raw socket, NOT urllib: Windows proxy settings (the user's own
+    VPN app sets one) would send even a 127.0.0.1 request through the proxy and
+    make this always look 'not running'.
+    """
+    s = socket.socket()
+    s.settimeout(3)
+    try:
+        s.connect(("127.0.0.1", PORT))
+        s.sendall(b"GET /api/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        data = b""
+        while len(data) < 4096:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"fleet-manager" in data:
+                break
+        return b"fleet-manager" in data
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+def seed_db_if_first_run():
+    """Ship the known servers/services/users inside the exe: on the very first
+    run (no fleet.db yet) copy the bundled seed so the app opens ready to use."""
+    if os.path.exists(core.DB_PATH):
+        return False
+    seed = os.path.join(getattr(sys, "_MEIPASS", APP_DIR_LOCAL), "assets", "seed.db")
+    if os.path.exists(seed):
         try:
-            s.bind(("127.0.0.1", p))
-            return p
+            import shutil
+            shutil.copy(seed, core.DB_PATH)
+            return True
         except Exception:
-            continue
-        finally:
-            s.close()
-    return 8799
+            pass
+    return False
+
+
+APP_DIR_LOCAL = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
 
 
 def main():
+    url = "http://127.0.0.1:%d/" % PORT
+    if already_running():
+        webbrowser.open(url)
+        return
+    seeded = seed_db_if_first_run()
     core.init_db()
     core.ensure_key()
-    port = free_port()
-    srv = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
+    if seeded:
+        core.log_event("app", "first run - loaded the bundled server list")
+    try:
+        srv = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        # lost the race with another copy starting at the same moment, or the
+        # port belongs to some other program
+        if already_running():
+            webbrowser.open(url)
+            return
+        _fatal("Port %d is busy on this PC. Close whatever is using it and start again." % PORT)
+        return
     srv.daemon_threads = True
     threading.Thread(target=auto_refresh_loop, daemon=True).start()
-    url = "http://127.0.0.1:%d/" % port
     print("Fleet Manager running at " + url)
     try:
         webbrowser.open(url)
@@ -472,6 +562,19 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+def _fatal(msg):
+    try:
+        with open(os.path.join(APP_DIR_LOCAL, "error.log"), "a") as f:
+            f.write("%s  %s\n" % (datetime.datetime.now().isoformat(timespec="seconds"), msg))
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, "Fleet Manager", 0x10)
+    except Exception:
+        print(msg)
 
 
 if __name__ == "__main__":

@@ -21,3 +21,7 @@ Thumbs.db
 # vpn-stack per-user state (passwords)
 users.json
 /opt/ovpnpanel/
+
+# Fleet Manager: the seeded DB holds real server credentials - never commit it
+fleet-manager/assets/seed.db
+fleet-manager/*.db
