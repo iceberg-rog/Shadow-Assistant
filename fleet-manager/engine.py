@@ -16,6 +16,11 @@ JOB = {"running": False, "percent": 0, "step": "", "log": [], "done": False,
        "ok": False, "result": ""}
 _JLOCK = threading.Lock()
 
+# Serialises "read the server's list" against "write a change".  Without it the
+# background sync can run between the local insert and the push of a new account
+# and delete it as 'not on the server yet' - losing the account silently.
+STATE_LOCK = threading.RLock()
+
 
 def jset(pct=None, step=None, line=None, **kw):
     with _JLOCK:
@@ -208,9 +213,14 @@ def push_users(srv, service_id):
     return len(blob)
 
 
-def pull_users(srv, service_id):
-    """Read live usage back from a server into the DB (so graphs + migrations
-    always carry the latest consumed data)."""
+def pull_users(srv, service_id, log_usage=True):
+    """Read the server's account list back into the DB.
+
+    The SERVER is the source of truth: two people running this app on two PCs
+    each have their own fleet.db, so the only way they agree is by both syncing
+    from the box. That means accounts added/removed/changed anywhere show up
+    everywhere without anyone pressing refresh.
+    """
     try:
         with SSH(srv["ip"], srv["ssh_user"], srv["auth_method"], srv["secret"]) as s:
             raw = s.get_text("/opt/ovpnpanel/users.json")
@@ -221,6 +231,15 @@ def pull_users(srv, service_id):
         blob = json.loads(raw)
     except Exception:
         return 0, 0
+    with STATE_LOCK:
+        return _apply_pull(blob, live, service_id, log_usage)
+
+
+def _apply_pull(blob, live, service_id, log_usage):
+    # accounts deleted on the server (or by the other operator) must disappear here too
+    for row in q("SELECT id, username FROM users WHERE service_id=?", (service_id,)):
+        if row["username"] not in blob:
+            x("DELETE FROM users WHERE id=?", (row["id"],))
     n = 0
     for name, d in blob.items():
         row = q("SELECT id FROM users WHERE service_id=? AND username=?", (service_id, name), one=True)
@@ -239,9 +258,13 @@ def pull_users(srv, service_id):
         live_n = int(live.strip() or 0)
     except Exception:
         live_n = 0
-    total = sum(float(d.get("used_bytes", 0)) for d in blob.values())
-    x("INSERT INTO usage_log(ts,service_id,total_bytes,user_count,live_conns) VALUES(?,?,?,?,?)",
-      (now(), service_id, total, len(blob), live_n))
+    if log_usage:
+        # only for the periodic snapshot - the fast sync must not flood the graph
+        total = sum(float(d.get("used_bytes", 0)) for d in blob.values())
+        x("INSERT INTO usage_log(ts,service_id,total_bytes,user_count,live_conns) VALUES(?,?,?,?,?)",
+          (now(), service_id, total, len(blob), live_n))
+    else:
+        x("UPDATE services SET note=? WHERE id=?", ("live:%d" % live_n, service_id))
     return n, live_n
 
 
@@ -481,19 +504,20 @@ def job_adopt(service_id=None, iran_id=None, foreign_id=None, name=None):
 # ------------------------------------------------------------ user actions
 def add_user(service_id, username, password, days, gb, conns):
     exp = str(datetime.date.today() + datetime.timedelta(days=int(days))) if int(days or 0) > 0 else None
-    row = q("SELECT id FROM users WHERE service_id=? AND username=?", (service_id, username), one=True)
-    if row:
-        x("UPDATE users SET password=?,expire=?,limit_gb=?,max_conn=?,enabled=1 WHERE id=?",
-          (password, exp, float(gb) if float(gb or 0) > 0 else None,
-           int(conns) if int(conns or 0) > 0 else None, row["id"]))
-    else:
-        x("INSERT INTO users(service_id,username,password,expire,limit_gb,max_conn,used_bytes,enabled,created_at)"
-          " VALUES(?,?,?,?,?,?,0,1,?)",
-          (service_id, username, password, exp, float(gb) if float(gb or 0) > 0 else None,
-           int(conns) if int(conns or 0) > 0 else None, today()))
-    svc = q("SELECT * FROM services WHERE id=?", (service_id,), one=True)
-    iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
-    return push_users(iran, service_id)
+    with STATE_LOCK:   # hold off the background sync until this is on the server
+        row = q("SELECT id FROM users WHERE service_id=? AND username=?", (service_id, username), one=True)
+        if row:
+            x("UPDATE users SET password=?,expire=?,limit_gb=?,max_conn=?,enabled=1 WHERE id=?",
+              (password, exp, float(gb) if float(gb or 0) > 0 else None,
+               int(conns) if int(conns or 0) > 0 else None, row["id"]))
+        else:
+            x("INSERT INTO users(service_id,username,password,expire,limit_gb,max_conn,used_bytes,enabled,created_at)"
+              " VALUES(?,?,?,?,?,?,0,1,?)",
+              (service_id, username, password, exp, float(gb) if float(gb or 0) > 0 else None,
+               int(conns) if int(conns or 0) > 0 else None, today()))
+        svc = q("SELECT * FROM services WHERE id=?", (service_id,), one=True)
+        iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
+        return push_users(iran, service_id)
 
 
 def refresh_service(service_id):

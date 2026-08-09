@@ -8,7 +8,9 @@ import os, sys, json, time, threading, webbrowser, datetime, urllib.parse, urlli
 import core, engine
 from core import q, x, now, today
 
-PORT = 8770          # fixed on purpose: one app, one port, one database
+# Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
+# hatch for the rare case where 8770 belongs to some other program.
+PORT = int(os.environ.get("FLEET_PORT", "8770"))
 
 
 # --------------------------------------------------------------- helpers
@@ -79,7 +81,8 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
 </style>
 <div class=wrap>
 <h1>Fleet Manager</h1>
-<div class=sub>Provision, migrate and monitor your VPN servers &mdash; everything stored locally in <span class=mono>fleet.db</span></div>
+<div class=sub>Provision, migrate and monitor your VPN servers
+ &nbsp;&middot;&nbsp; <span id=syncdot style="color:var(--mut)">&#9679;</span> <span id=syncmsg class=mini>connecting...</span></div>
 <div class=tabs>
   <button data-t=dash class=on onclick=tab('dash')>Dashboard</button>
   <button data-t=servers onclick=tab('servers')>Servers</button>
@@ -104,6 +107,10 @@ function api(p,d){return fetch(p,{method:d?'POST':'GET',body:d?new URLSearchPara
 function load(){api('/api/state').then(s=>{S=s;render();});}
 function esc(x){return (x===null||x===undefined)?'':String(x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function render(){
+  var sy=S.sync||{};
+  var d=document.getElementById('syncdot'), m=document.getElementById('syncmsg');
+  if(d){d.style.color=sy.ok?'var(--ok)':'var(--warn)';
+        m.textContent=(sy.msg||'')+(sy.ts?(' \\u00b7 '+sy.ts.replace('T',' ').slice(5)):'');}
   var v=document.getElementById('view');
   if(cur=='dash')v.innerHTML=dash();
   else if(cur=='servers')v.innerHTML=servers();
@@ -287,7 +294,15 @@ function poll(){
     else{dt.textContent=j.ok?'Done':'Needs attention';dm.textContent=j.result||'';dlg.showModal();}
   });
 }
-load();setInterval(function(){if(cur=='dash')load();},15000);
+load();
+// keep every tab live. Skip a redraw while someone is typing or a dropdown is
+// open, otherwise the refresh would wipe what they are in the middle of entering.
+setInterval(function(){
+  var a=document.activeElement;
+  if(a&&(a.tagName=='INPUT'||a.tagName=='SELECT'||a.tagName=='TEXTAREA'))return;
+  if(document.getElementById('dlg').open)return;
+  load();
+},5000);
 </script>
 """
 
@@ -406,21 +421,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 f.get("days", 0), f.get("gb", 0), f.get("conns", 0))
                 self._json({"ok": True})
             elif p == "/api/user-act":
-                u = q("SELECT * FROM users WHERE id=?", (f["id"],), one=True)
-                if u:
-                    if f["action"] == "del":
-                        x("DELETE FROM users WHERE id=?", (u["id"],))
-                    elif f["action"] == "toggle":
-                        x("UPDATE users SET enabled=? WHERE id=?", (0 if u["enabled"] else 1, u["id"]))
-                    elif f["action"] == "reset":
-                        x("UPDATE users SET used_bytes=0 WHERE id=?", (u["id"],))
-                    svc = q("SELECT * FROM services WHERE id=?", (u["service_id"],), one=True)
-                    if svc:
-                        iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
-                        try:
-                            engine.push_users(iran, svc["id"])
-                        except Exception:
-                            pass
+                with engine.STATE_LOCK:   # keep the sync out until the change is on the server
+                    u = q("SELECT * FROM users WHERE id=?", (f["id"],), one=True)
+                    if u:
+                        if f["action"] == "del":
+                            x("DELETE FROM users WHERE id=?", (u["id"],))
+                        elif f["action"] == "toggle":
+                            x("UPDATE users SET enabled=? WHERE id=?", (0 if u["enabled"] else 1, u["id"]))
+                        elif f["action"] == "reset":
+                            x("UPDATE users SET used_bytes=0 WHERE id=?", (u["id"],))
+                        svc = q("SELECT * FROM services WHERE id=?", (u["service_id"],), one=True)
+                        if svc:
+                            iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
+                            try:
+                                engine.push_users(iran, svc["id"])
+                            except Exception as e:
+                                return self._json({"err": "saved locally but the server did not accept it: %s" % e})
                 self._json({"ok": True})
             elif p == "/api/refresh":
                 engine.refresh_service(int(f["service"]))
@@ -464,24 +480,47 @@ def state():
         "chart": chart, "chart_max_h": fmt_bytes(max([p["v"] for p in chart], default=0)),
         "events": q("SELECT * FROM events ORDER BY id DESC LIMIT 12"),
         "key_cmd": core.key_install_command(),
+        "sync": dict(SYNC),
         "kpi": {"servers": len(servers), "services": len(services),
                 "users": len(users), "total_h": fmt_bytes(total_all), "live": live_all},
     }
 
 
+SYNC = {"ts": None, "ok": False, "msg": "starting..."}
+
+
 def auto_refresh_loop():
-    """Every 5 minutes pull usage from every live service so the graph grows
-    even when the window is just sitting open."""
+    """Keep this copy in step with the servers.
+
+    The server holds the real account list, so two operators on two PCs (each
+    with their own fleet.db) only agree if both keep pulling from it. Sync runs
+    every 15s - add or change a user anywhere and it appears here on its own,
+    with nobody pressing refresh. A heavier snapshot for the graph is taken
+    every 5 minutes so the usage history doesn't get flooded.
+    """
+    last_snapshot = 0
     while True:
-        time.sleep(300)
         try:
-            for s in q("SELECT id FROM services"):
+            services = q("SELECT id FROM services")
+            snapshot = (time.time() - last_snapshot) > 300
+            okc = 0
+            for s in services:
                 try:
-                    engine.refresh_service(s["id"])
+                    svc = q("SELECT * FROM services WHERE id=?", (s["id"],), one=True)
+                    iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
+                    if iran:
+                        engine.pull_users(iran, s["id"], log_usage=snapshot)
+                        okc += 1
                 except Exception:
                     pass
-        except Exception:
-            pass
+            if snapshot:
+                last_snapshot = time.time()
+            SYNC.update(ts=now(), ok=(okc == len(services) and len(services) > 0),
+                        msg=("synced with %d/%d server(s)" % (okc, len(services))) if services
+                            else "no service yet")
+        except Exception as e:
+            SYNC.update(ts=now(), ok=False, msg="sync problem: %s" % e)
+        time.sleep(15)
 
 
 def already_running():
