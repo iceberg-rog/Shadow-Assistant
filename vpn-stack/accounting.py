@@ -82,6 +82,31 @@ def ovpn_kill(cn):
         s.recv(4096); s.sendall(("kill %s\n"%cn).encode()); time.sleep(0.2); s.recv(4096); s.close()
     except Exception: pass
 
+def ovpn_conns():
+    """CN -> list of (real_addr, connected_since_epoch), one entry per live connection."""
+    conns={}
+    try:
+        for ln in open(OVPN_STATUS).read().splitlines():
+            if ln.startswith("CLIENT_LIST,"):
+                p=ln.split(",")
+                if len(p)>=9 and p[1] and p[1]!="UNDEF":
+                    try: since=int(p[8])
+                    except Exception: since=0
+                    conns.setdefault(p[1],[]).append((p[2], since))
+    except Exception: pass
+    return conns
+
+def enforce_maxconn(users):
+    """Per-user simultaneous-connection cap. Keep the oldest max_conn sessions,
+    kick the newer excess (a user can't exceed their device count)."""
+    for u,lst in ovpn_conns().items():
+        mc=users.get(u,{}).get("max_conn")
+        try: mc=int(mc)
+        except Exception: mc=0
+        if mc and len(lst)>mc:
+            for addr,_ in sorted(lst, key=lambda x: x[1])[mc:]:   # newest excess
+                ovpn_kill(addr)   # management: "kill <IP:port>" drops that one session
+
 def l2tp_kill(over):
     try:
         for iface in os.listdir(L2TP_MAP):
@@ -112,6 +137,7 @@ def loop():
             if over:
                 for cn in over: ovpn_kill(cn)
                 l2tp_kill(set(over))
+            enforce_maxconn(users)   # per-user simultaneous-connection cap
         except Exception:
             pass
         time.sleep(10)

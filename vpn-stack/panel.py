@@ -55,6 +55,18 @@ def days_left(exp):
         return str(d)+"d" if d>=0 else "expired"
     except Exception: return "?"
 
+OVPN_STATUS="/var/log/openvpn-status.log"
+def live_conns():
+    """username -> number of live OpenVPN connections right now."""
+    c={}
+    try:
+        for ln in open(OVPN_STATUS).read().splitlines():
+            if ln.startswith("CLIENT_LIST,"):
+                p=ln.split(",")
+                if len(p)>=2 and p[1] and p[1]!="UNDEF": c[p[1]]=c.get(p[1],0)+1
+    except Exception: pass
+    return c
+
 def ovpn_template():
     try: ca=open(CA).read(); ta=open(TA).read()
     except Exception: return None
@@ -113,8 +125,12 @@ class H(http.server.BaseHTTPRequestHandler):
                     try: gb=float(gb)
                     except Exception: gb=0
                     exp=str(datetime.date.today()+datetime.timedelta(days=days)) if days>0 else None
+                    mc=q.get("conns",["0"])[0]
+                    try: mc=int(mc)
+                    except Exception: mc=0
                     ex=users.get(n,{})
                     users[n]={"password":pwd,"expire":exp,"limit_gb":(gb if gb>0 else None),
+                              "max_conn":(mc if mc>0 else None),
                               "used_bytes":ex.get("used_bytes",0),"enabled":True,
                               "created":ex.get("created",str(datetime.date.today()))}
             elif path=="/user-del" and n in users:
@@ -128,10 +144,11 @@ class H(http.server.BaseHTTPRequestHandler):
             fcntl.flock(f,fcntl.LOCK_UN); f.close()
         self.send_response(303); self.send_header("Location","/"); self.end_headers()
     def page(self):
-        users=load(); rows=""
+        users=load(); lc=live_conns(); total_used=0.0; rows=""
         for u in sorted(users):
             x=users[u]
-            used=float(x.get("used_bytes",0)); lim=x.get("limit_gb")
+            used=float(x.get("used_bytes",0)); lim=x.get("limit_gb"); total_used+=used
+            mc=x.get("max_conn"); dev=str(lc.get(u,0))+" / "+(str(mc) if mc else "∞")
             pct=(min(100,int(used/(lim*GB)*100)) if lim else 0)
             usage=fmt(used)+(" / "+("%g GB"%lim) if lim else " / ∞")
             bar=("<div style='background:#eee;border-radius:4px;height:6px;width:120px;display:inline-block;vertical-align:middle'><div style='height:6px;border-radius:4px;width:"+str(pct)+"%;background:"+("#c0392b" if pct>=90 else "#2563eb")+"'></div></div>") if lim else ""
@@ -143,7 +160,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 on=(' onsubmit="return confirm(&quot;'+label+' '+u+'?&quot;)"') if confirm else ''
                 return '<form method=post action=/'+action+' style=display:inline'+on+'><input type=hidden name=name value="'+u+'"><button>'+label+'</button></form>'
             rows+=("<tr><td>"+html.escape(u)+"</td><td><code>"+html.escape(x.get("password",""))+"</code></td>"
-                   "<td>"+days_left(expd)+"</td><td>"+usage+" "+bar+"</td><td>"+stt+"</td>"
+                   "<td>"+days_left(expd)+"</td><td>"+usage+" "+bar+"</td><td>"+dev+"</td><td>"+stt+"</td>"
                    "<td>"+form("user-toggle","toggle")+" "+form("user-reset","reset")+" "+form("user-del","delete",1)+"</td></tr>")
         stat=("openvpn="+svc("openvpn-server@server")+" &middot; xray-ovpn="+svc("xray-ovpn")+" &middot; tcp2socks="+svc("tcp2socks")+
               " &middot; ipsec="+(svc("strongswan-starter") or svc("strongswan"))+" &middot; xl2tpd="+svc("xl2tpd")+" &middot; accounting="+svc("vpn-accounting"))
@@ -153,16 +170,21 @@ class H(http.server.BaseHTTPRequestHandler):
         "button{cursor:pointer;padding:.25rem .6rem;font-size:13px}input{padding:.4rem;margin:2px}a{color:#2563eb;text-decoration:none}"
         "code{background:#f2f2f2;padding:.1rem .3rem;border-radius:3px}h3{margin-top:1.4rem;border-bottom:2px solid #111;padding-bottom:.2rem}"
         ".box{background:#f7f7f7;padding:.6rem 1rem;border-radius:6px;margin:.4rem 0}</style>"
-        "<h2>Fleet VPN Panel &mdash; relay 85</h2>"
-        "<p style=color:#666;font-size:13px>services: "+stat+"<br>egress = 46.62 (foreign) &middot; one account works on BOTH OpenVPN and L2TP</p>"
+        "<h2>Fleet VPN Panel &mdash; "+html.escape(SERVER_IP)+"</h2>"
+        "<p style=color:#666;font-size:13px>services: "+stat+"<br>foreign egress &middot; one account works on BOTH OpenVPN and L2TP</p>"
+        "<div class=box style='display:flex;gap:2rem;flex-wrap:wrap;font-size:14px'>"
+        "<div><b>Total data used:</b> "+fmt(total_used)+"</div>"
+        "<div><b>Live connections now:</b> "+str(sum(lc.values()))+"</div>"
+        "<div><b>Users:</b> "+str(len(users))+"</div></div>"
         "<h3>Users</h3>"
         "<form method=post action=/user-add class=box>"
         "<input name=name placeholder='username' pattern='[A-Za-z0-9_-]{1,32}' required> "
         "<input name=password placeholder='password' required> "
         "<input name=days type=number min=0 placeholder='days (0=∞)' style=width:110px> "
         "<input name=gb type=number min=0 step=0.5 placeholder='GB (0=∞)' style=width:110px> "
+        "<input name=conns type=number min=0 placeholder='devices (0=∞)' style=width:130px> "
         "<button>+ Add user</button></form>"
-        "<table><tr><th>username</th><th>password</th><th>expires</th><th>data used</th><th>status</th><th>actions</th></tr>"+rows+"</table>"
+        "<table><tr><th>username</th><th>password</th><th>expires</th><th>data used</th><th>devices (now/max)</th><th>status</th><th>actions</th></tr>"+rows+"</table>"
         "<h3>How clients connect</h3>"
         "<div class=box><b>OpenVPN:</b> download <a href=/ovpn>fleet-ovpn.ovpn</a> (same file for everyone) &rarr; import in any OpenVPN app &rarr; it asks for <b>username + password</b> from the table above.</div>"
         "<div class=box><b>L2TP/IPsec:</b> Server <code>"+SERVER_IP+"</code> &middot; Pre-shared key <code>"+html.escape(get_psk())+"</code> &middot; username + password from the table.</div>"
