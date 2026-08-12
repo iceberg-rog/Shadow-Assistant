@@ -8,7 +8,7 @@ import os, sys, json, time, threading, webbrowser, datetime, subprocess, urllib.
 import core, engine
 from core import q, x, now, today
 
-VERSION = "1.3"      # bumped on every build handed out - drives the upgrade takeover
+VERSION = "1.4"      # bumped on every build handed out - drives the upgrade takeover
 
 # Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
 # hatch for the rare case where 8770 belongs to some other program.
@@ -138,6 +138,7 @@ function dash(){
      +(s.panel?'<a href="'+esc(s.panel)+'" target=_blank><button class=ghost>panel</button></a> ':'')
      +'<a href="/api/ovpn?service='+s.id+'"><button class=ghost>.ovpn</button></a></td></tr>';
     h+='<tr><td colspan=7 class=mini style=padding-top:0>'
+     +(s.note=='direct'?'&nbsp;&nbsp;<b style="color:var(--warn)">DIRECT</b> (no Iran relay) &nbsp;&middot;&nbsp; ':'')
      +'&nbsp;&nbsp;OpenVPN: <span class=mono>'+esc(s.iran_ip)+':1194</span>'
      +(s.panel_user?' &nbsp;&middot;&nbsp; panel login: <span class=mono>'+esc(s.panel_user)+' / '+esc(s.panel_pass)+'</span>':'')
      +(s.l2tp_psk?' &nbsp;&middot;&nbsp; L2TP PSK: <span class=mono>'+esc(s.l2tp_psk)+'</span>':'')
@@ -220,6 +221,17 @@ function build(){
    +'<div><label>Copy users from</label>'+selService('bcopy',true)+'</div>'
    +'<div><button onclick=doBuild()>Install everything</button></div></div>'
    +'<div class=hint>Installs OpenVPN + L2TP + the user panel on the Iran box, the tunnel on the foreign box, wires them together, then <b>verifies the whole chain</b> and reports.</div></div>';
+  h+='<div class=card style="border-color:#5b4a1f"><h2>Iran servers blocked? Build a DIRECT service</h2>'
+   +'<div class=row>'
+   +'<div><label>Foreign server (customers connect here AND exit here)</label>'+sel('dfg',fg)+'</div>'
+   +'<div><label>Service name</label><input id=dname placeholder="direct service"></div>'
+   +'<div><label>Panel user</label><input id=dpu value=admin style=width:110px></div>'
+   +'<div><label>Panel password (blank = auto)</label><input id=dpp style=width:170px></div>'
+   +'<div><label>Copy users from</label>'+selService('dcopy',true)+'</div>'
+   +'<div><button onclick=doDirect()>Build direct service</button></div></div>'
+   +'<div class=hint>No Iran relay at all: OpenVPN + L2TP + the panel run on the foreign server and customers dial it straight, '
+   +'keeping their data used and days left. Use this when the domestic servers are filtered. '
+   +'<b>Trade-off:</b> the connection goes abroad with nothing domestic in front of it, so it is easier for an ISP to spot and block than the relay setup &mdash; expect to swap the IP more often.</div></div>';
   h+='<div class=card><h2>Already have a running pair?</h2>'
    +'<div class=row><div><label>Iran server</label>'+sel('air',ir)+'</div>'
    +'<div><label>Foreign server</label>'+sel('afg',fg)+'</div>'
@@ -233,6 +245,12 @@ function doBuild(){
   if(!bir.value||!bfg.value){alert('Add an Iran server and a foreign server first (Servers tab).');return;}
   showJob();
   api('/api/build',{iran:bir.value,foreign:bfg.value,name:bname.value,puser:bpu.value,ppass:bpp.value,copy_from:bcopy.value}).then(poll);
+}
+function doDirect(){
+  if(!dfg.value){alert('Add a foreign server first (Servers tab).');return;}
+  if(!confirm('Install OpenVPN + panel directly on that foreign server?\n\nCustomers will connect straight to it - no Iran relay.'))return;
+  showJob();
+  api('/api/build-direct',{foreign:dfg.value,name:dname.value,puser:dpu.value,ppass:dpp.value,copy_from:dcopy.value}).then(poll);
 }
 function doAdopt(){
   if(!air.value||!afg.value){alert('Pick both servers.');return;}
@@ -415,6 +433,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 engine.job_new_service(int(f["iran"]), int(f["foreign"]), f.get("name"),
                                        f.get("puser") or "admin", f.get("ppass") or None,
                                        int(f["copy_from"]) if f.get("copy_from") else None)
+                self._json({"ok": True})
+            elif p == "/api/build-direct":
+                engine.job_direct_service(int(f["foreign"]), f.get("name"),
+                                          f.get("puser") or "admin", f.get("ppass") or None,
+                                          int(f["copy_from"]) if f.get("copy_from") else None)
                 self._json({"ok": True})
             elif p == "/api/adopt":
                 engine.job_adopt(iran_id=int(f["iran"]), foreign_id=int(f["foreign"]))

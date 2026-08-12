@@ -24,11 +24,18 @@
 # ==========================================================================
 set -euo pipefail
 
-RELAY_IP="${RELAY_IP:?set RELAY_IP=the relay public IP}"
-EXIT_IP="${EXIT_IP:?set EXIT_IP=the foreign exit IP}"
-TUN_UUID="${TUN_UUID:?set TUN_UUID (tunnel client uuid, from the exit)}"
-TUN_PUB="${TUN_PUB:?set TUN_PUB (tunnel REALITY public key, from the exit)}"
-TUN_SID="${TUN_SID:?set TUN_SID (tunnel REALITY short id, from the exit)}"
+# DIRECT=1 -> this box IS the exit: customers dial it straight and egress from its
+# own connection (used when the Iran relays are blocked). No tunnel, no relay.
+DIRECT="${DIRECT:-0}"
+RELAY_IP="${RELAY_IP:?set RELAY_IP=the public IP customers connect to}"
+if [ "$DIRECT" = 1 ]; then
+  EXIT_IP="$RELAY_IP"; TUN_UUID=""; TUN_PUB=""; TUN_SID=""
+else
+  EXIT_IP="${EXIT_IP:?set EXIT_IP=the foreign exit IP}"
+  TUN_UUID="${TUN_UUID:?set TUN_UUID (tunnel client uuid, from the exit)}"
+  TUN_PUB="${TUN_PUB:?set TUN_PUB (tunnel REALITY public key, from the exit)}"
+  TUN_SID="${TUN_SID:?set TUN_SID (tunnel REALITY short id, from the exit)}"
+fi
 PANEL_PORT="${PANEL_PORT:-2098}"
 PANEL_USER="${PANEL_USER:-admin}"
 PANEL_PASS="${PANEL_PASS:-$(openssl rand -base64 9 | tr -dc 'A-Za-z0-9')}"
@@ -42,7 +49,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq openvpn easy-rsa strongswan strongswan-starter libcharon-extra-plugins \
                       xl2tpd ppp openssl curl python3 iptables dnsmasq >/dev/null
-command -v /usr/local/bin/xray >/dev/null || { echo "ERROR: xray missing -- run installer/iran.sh first"; exit 1; }
+if [ "$DIRECT" != 1 ]; then
+  command -v /usr/local/bin/xray >/dev/null || { echo "ERROR: xray missing -- run installer/iran.sh first"; exit 1; }
+fi
 [ -c /dev/net/tun ] || { echo "ERROR: /dev/net/tun missing (need KVM, not OpenVZ)"; exit 1; }
 
 # --- 2) component files ---
@@ -76,18 +85,28 @@ if [ ! -f /etc/openvpn/server/server.crt ]; then
 fi
 install -m644 "$DIR/templates/openvpn-server.conf" /etc/openvpn/server/server.conf
 
-# --- 4) xray-ovpn: socks(:11080) -> fleet tunnel -> exit ---
-subst "$DIR/templates/config-ovpn.json" > /usr/local/etc/xray/config-ovpn.json
-/usr/local/bin/xray -test -c /usr/local/etc/xray/config-ovpn.json >/dev/null
+# --- 4) xray-ovpn: socks(:11080) -> fleet tunnel -> exit  (relay mode only) ---
+if [ "$DIRECT" != 1 ]; then
+  subst "$DIR/templates/config-ovpn.json" > /usr/local/etc/xray/config-ovpn.json
+  /usr/local/bin/xray -test -c /usr/local/etc/xray/config-ovpn.json >/dev/null
+fi
 
-# --- 5) tcp2socks + routing (10.8.0.0/24 OpenVPN, 10.10.0.0/24 L2TP -> tunnel) ---
-subst "$DIR/templates/ovpn-route-up.sh" > /usr/local/sbin/ovpn-route-up.sh
-chmod +x /usr/local/sbin/ovpn-route-up.sh
+# --- 5) routing: through the tunnel (relay) or straight out of this box (direct) ---
+if [ "$DIRECT" = 1 ]; then
+  install -m755 "$DIR/templates/ovpn-route-direct.sh" /usr/local/sbin/ovpn-route-up.sh
+else
+  subst "$DIR/templates/ovpn-route-up.sh" > /usr/local/sbin/ovpn-route-up.sh
+  chmod +x /usr/local/sbin/ovpn-route-up.sh
+fi
 
 # --- 5b) DNS through the tunnel (avoid Iran's 10.10.34.x DNS poisoning) ---
 # dnsmasq answers on the VPN gateways and forwards to dns2socks, which resolves
 # via the fleet tunnel at the foreign exit. VPN clients are pushed the gateway as DNS.
 PUBDEV="$(ip route show default | awk '{print $5; exit}')"
+# direct mode resolves straight upstream (this box is abroad, nothing is poisoned);
+# relay mode sends queries to dns2socks so they are answered at the foreign exit
+if [ "$DIRECT" = 1 ]; then DNS_UP="server=1.1.1.1
+server=8.8.8.8"; else DNS_UP="server=127.0.0.1#5300"; fi
 cat > /etc/dnsmasq.d/vpn-tunnel-dns.conf <<EOF
 port=53
 no-resolv
@@ -95,7 +114,7 @@ no-hosts
 bind-dynamic
 except-interface=$PUBDEV
 except-interface=lo
-server=127.0.0.1#5300
+$DNS_UP
 cache-size=1000
 EOF
 
@@ -135,6 +154,16 @@ sysctl -p /etc/sysctl.d/60-vpn-stack.conf >/dev/null 2>&1 || true
   -out /opt/ovpnpanel/cert.pem -days 3650 -nodes -subj "/CN=$RELAY_IP" >/dev/null 2>&1
 
 # --- 9) systemd units ---
+if [ "$DIRECT" = 1 ]; then
+  # direct mode has no tunnel plumbing: remove the units entirely so nothing can
+  # pull them back up (ovpn-route Wants= them) and tcp2socks does not sit on a
+  # public port for no reason
+  systemctl disable --now xray-ovpn tcp2socks dns2socks >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/xray-ovpn.service /etc/systemd/system/tcp2socks.service \
+        /etc/systemd/system/dns2socks.service
+  systemctl daemon-reload
+fi
+if [ "$DIRECT" != 1 ]; then
 cat > /etc/systemd/system/xray-ovpn.service <<EOF
 [Unit]
 Description=xray OpenVPN/L2TP egress router (socks -> fleet tunnel -> exit)
@@ -171,11 +200,18 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+fi   # end of tunnel-only units
+
+if [ "$DIRECT" = 1 ]; then
+  ROUTE_DEPS=""       # nothing to wait for: this box egresses on its own
+else
+  ROUTE_DEPS="After=tcp2socks.service xray-ovpn.service openvpn-server@server.service
+Wants=tcp2socks.service xray-ovpn.service"
+fi
 cat > /etc/systemd/system/ovpn-route.service <<EOF
 [Unit]
-Description=VPN egress routing (tcp2socks + nat)
-After=tcp2socks.service xray-ovpn.service openvpn-server@server.service
-Wants=tcp2socks.service xray-ovpn.service
+Description=VPN egress routing (nat)
+${ROUTE_DEPS}
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/ovpn-route-up.sh
@@ -212,7 +248,14 @@ EOF
 
 # --- 10) enable + start ---
 systemctl daemon-reload
-systemctl enable --now openvpn-server@server xray-ovpn tcp2socks dns2socks vpn-accounting ovpn-panel >/dev/null 2>&1
+if [ "$DIRECT" = 1 ]; then
+  # no tunnel plumbing in direct mode - make sure a previous relay install's
+  # services are not left running and hijacking the traffic
+  systemctl disable --now xray-ovpn tcp2socks dns2socks >/dev/null 2>&1 || true
+  systemctl enable --now openvpn-server@server vpn-accounting ovpn-panel >/dev/null 2>&1
+else
+  systemctl enable --now openvpn-server@server xray-ovpn tcp2socks dns2socks vpn-accounting ovpn-panel >/dev/null 2>&1
+fi
 systemctl enable strongswan-starter xl2tpd >/dev/null 2>&1
 systemctl restart strongswan-starter xl2tpd
 systemctl restart dnsmasq
@@ -221,9 +264,16 @@ sleep 2
 
 echo
 echo "================= VPN STACK INSTALLED ================="
+if [ "$DIRECT" = 1 ]; then
+  echo "  Mode:       DIRECT (customers dial this server, no Iran relay)"
+  SVC_LIST="openvpn-server@server vpn-accounting ovpn-panel strongswan-starter xl2tpd"
+else
+  echo "  Mode:       relay -> tunnel -> foreign exit"
+  SVC_LIST="openvpn-server@server xray-ovpn tcp2socks vpn-accounting ovpn-panel strongswan-starter xl2tpd"
+fi
 echo "  Panel:      https://$RELAY_IP:$PANEL_PORT/    ($PANEL_USER / $PANEL_PASS)"
 echo "  OpenVPN:    port 1194/tcp, shared .ovpn from the panel, user/pass login"
 echo "  L2TP/IPsec: server $RELAY_IP, PSK: $L2TP_PSK, user/pass from the panel"
-echo "  Egress IP:  $EXIT_IP (foreign)"
-echo "  Services:   $(for s in openvpn-server@server xray-ovpn tcp2socks vpn-accounting ovpn-panel strongswan-starter xl2tpd; do printf '%s=%s ' "$s" "$(systemctl is-active "$s")"; done)"
+echo "  Egress IP:  $EXIT_IP"
+echo "  Services:   $(for s in $SVC_LIST; do printf '%s=%s ' "$s" "$(systemctl is-active "$s")"; done)"
 echo "======================================================"

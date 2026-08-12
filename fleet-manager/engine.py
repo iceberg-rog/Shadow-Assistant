@@ -52,7 +52,7 @@ def asset(*p):
 
 VPN_FILES = ["install.sh", "accounting.py", "dns2socks.py", "ovpn-auth.py", "panel.py", "tcp2socks.py"]
 VPN_TPL = ["config-ovpn.json", "ipsec.conf", "openvpn-server.conf", "options.xl2tpd",
-           "ovpn-route-up.sh", "xl2tpd.conf"]
+           "ovpn-route-up.sh", "ovpn-route-direct.sh", "xl2tpd.conf"]
 
 
 # ------------------------------------------------------- foreign exit build
@@ -97,15 +97,23 @@ def _derive_pub(s, priv):
 
 
 # --------------------------------------------------------- iran relay build
-def build_iran(srv, exit_ip, params, panel_user="admin", panel_pass=None, panel_port=2098):
-    """Install OpenVPN + L2TP + panel on the Iran box, egressing through the tunnel."""
+def build_iran(srv, exit_ip, params, panel_user="admin", panel_pass=None, panel_port=2098,
+               direct=False):
+    """Install OpenVPN + L2TP + panel.
+
+    direct=False: on the Iran relay, egressing through the tunnel to the exit.
+    direct=True : on the foreign box itself - customers dial it straight and it
+                  egresses on its own connection. Used when the Iran relays are
+                  blocked, so there is no domestic hop left to hide behind.
+    """
+    who = "server" if direct else "iran"
     panel_pass = panel_pass or base64.b64encode(os.urandom(9)).decode().replace("/", "").replace("+", "")[:12]
     with SSH(srv["ip"], srv["ssh_user"], srv["auth_method"], srv["secret"]) as s:
-        jset(line=">> iran: checking prerequisites ...")
+        jset(line=">> %s: checking prerequisites ..." % who)
         if "yes" not in s.run("[ -c /dev/net/tun ] && echo yes || echo no"):
-            raise RuntimeError("/dev/net/tun missing on the Iran server (need KVM, not OpenVZ)")
-        # xray is required by install.sh (it validates config-ovpn.json with it)
-        if "26.3.27" not in s.run("/usr/local/bin/xray version 2>/dev/null || true"):
+            raise RuntimeError("/dev/net/tun missing on %s (need KVM, not OpenVZ)" % srv["ip"])
+        # xray is only needed by the tunnel path; direct mode never touches it
+        if not direct and "26.3.27" not in s.run("/usr/local/bin/xray version 2>/dev/null || true"):
             jset(line=">> iran: installing xray-core ...")
             s.run("apt-get update -y >/dev/null 2>&1; apt-get install -y curl unzip >/dev/null 2>&1", timeout=600)
             rc, out = s.run_rc(
@@ -118,7 +126,7 @@ def build_iran(srv, exit_ip, params, panel_user="admin", panel_pass=None, panel_
             if rc != 0:
                 raise RuntimeError("xray install failed on the Iran server")
 
-        jset(line=">> iran: uploading VPN stack ...")
+        jset(line=">> %s: uploading VPN stack ..." % who)
         s.run("mkdir -p /root/vpn-stack/templates")
         for f in VPN_FILES:
             s.put(asset("vpn-stack", f), "/root/vpn-stack/" + f)
@@ -126,11 +134,15 @@ def build_iran(srv, exit_ip, params, panel_user="admin", panel_pass=None, panel_
             s.put(asset("vpn-stack", "templates", f), "/root/vpn-stack/templates/" + f)
         s.run("sed -i 's/\\r$//' /root/vpn-stack/* /root/vpn-stack/templates/* 2>/dev/null; true")
 
-        jset(line=">> iran: installing OpenVPN + L2TP + panel (this takes a minute) ...")
-        env = ("RELAY_IP=%s EXIT_IP=%s TUN_UUID=%s TUN_PUB=%s TUN_SID=%s "
-               "PANEL_USER=%s PANEL_PASS=%s PANEL_PORT=%s " % (
-                   srv["ip"], exit_ip, params["tun_uuid"], params["tun_pub"], params["tun_sid"],
-                   panel_user, panel_pass, panel_port))
+        jset(line=">> %s: installing OpenVPN + L2TP + panel (this takes a minute) ..." % who)
+        if direct:
+            env = ("DIRECT=1 RELAY_IP=%s PANEL_USER=%s PANEL_PASS=%s PANEL_PORT=%s " % (
+                srv["ip"], panel_user, panel_pass, panel_port))
+        else:
+            env = ("RELAY_IP=%s EXIT_IP=%s TUN_UUID=%s TUN_PUB=%s TUN_SID=%s "
+                   "PANEL_USER=%s PANEL_PASS=%s PANEL_PORT=%s " % (
+                       srv["ip"], exit_ip, params["tun_uuid"], params["tun_pub"], params["tun_sid"],
+                       panel_user, panel_pass, panel_port))
         rc, out = s.run_rc(env + "bash /root/vpn-stack/install.sh", timeout=1800)
         for ln in out.splitlines():
             if ln.strip() and not ln.startswith("Warning"):
@@ -269,17 +281,29 @@ def _apply_pull(blob, live, service_id, log_usage):
 
 
 # ---------------------------------------------------------------- verify
-def verify_service(iran, foreign):
+def verify_service(iran, foreign, direct=False):
     """Prove the whole chain works: tunnel port, socks egress == foreign IP,
-    OpenVPN listening, panel answering, accounting alive."""
+    OpenVPN listening, panel answering, accounting alive.
+
+    In direct mode there is no tunnel: the box is its own exit, so we check that
+    it forwards and NATs the VPN subnets instead.
+    """
     checks = []
     with SSH(iran["ip"], iran["ssh_user"], iran["auth_method"], iran["secret"]) as s:
-        t = s.run("timeout 6 bash -c 'true <>/dev/tcp/%s/9443' 2>/dev/null && echo YES || echo NO" % foreign["ip"])
-        checks.append(("tunnel reachable (%s:9443)" % foreign["ip"], t.strip() == "YES", t.strip()))
+        if direct:
+            fwd = s.run("sysctl -n net.ipv4.ip_forward").strip()
+            checks.append(("IP forwarding on", fwd == "1", fwd))
+            nat = s.run("iptables -t nat -S POSTROUTING | grep -c 'MASQUERADE'").strip()
+            checks.append(("NAT for VPN clients", nat not in ("", "0"), nat + " rule(s)"))
+            out = s.run("curl -s --max-time 20 https://api.ipify.org || echo FAIL", timeout=40).strip()
+            checks.append(("server reaches the internet", out == foreign["ip"], out or "no answer"))
+        else:
+            t = s.run("timeout 6 bash -c 'true <>/dev/tcp/%s/9443' 2>/dev/null && echo YES || echo NO" % foreign["ip"])
+            checks.append(("tunnel reachable (%s:9443)" % foreign["ip"], t.strip() == "YES", t.strip()))
 
-        egress = s.run("curl -s --max-time 25 --socks5-hostname 127.0.0.1:11080 https://api.ipify.org || echo FAIL",
-                       timeout=45).strip()
-        checks.append(("egress goes through the foreign exit", egress == foreign["ip"], egress or "no answer"))
+            egress = s.run("curl -s --max-time 25 --socks5-hostname 127.0.0.1:11080 https://api.ipify.org || echo FAIL",
+                           timeout=45).strip()
+            checks.append(("egress goes through the foreign exit", egress == foreign["ip"], egress or "no answer"))
 
         ov = s.run("ss -tln | grep -c ':1194 ' || true").strip()
         checks.append(("OpenVPN listening on 1194", ov not in ("", "0"), "yes" if ov not in ("", "0") else "no"))
@@ -291,12 +315,60 @@ def verify_service(iran, foreign):
         acct = s.run("systemctl is-active vpn-accounting").strip()
         checks.append(("accounting/quota daemon", acct == "active", acct))
 
-        dns = s.run("systemctl is-active dns2socks").strip()
-        checks.append(("DNS-through-tunnel", dns == "active", dns))
+        if direct:
+            dns = s.run("systemctl is-active dnsmasq").strip()
+            checks.append(("DNS resolver for clients", dns == "active", dns))
+        else:
+            dns = s.run("systemctl is-active dns2socks").strip()
+            checks.append(("DNS-through-tunnel", dns == "active", dns))
     return checks
 
 
 # ------------------------------------------------------------------- jobs
+def job_direct_service(foreign_id, name, panel_user, panel_pass, migrate_from=None,
+                       migrate_usernames=None):
+    """Stand up a service on a foreign server ALONE - customers connect to it
+    directly. This is the fallback for when the Iran relays are blocked: there is
+    no domestic hop, so the customer's ISP sees a connection straight abroad."""
+    def run():
+        try:
+            jreset()
+            fgn = q("SELECT * FROM servers WHERE id=?", (foreign_id,), one=True)
+            jset(10, "server", ">> building %s as a direct server (no Iran relay) ..." % fgn["ip"])
+            pinfo = build_iran(fgn, fgn["ip"], {}, panel_user, panel_pass, direct=True)
+            x("UPDATE servers SET status='installed',panel_port=?,panel_user=?,panel_pass=?,l2tp_psk=?,last_seen=? WHERE id=?",
+              (pinfo["panel_port"], pinfo["panel_user"], pinfo["panel_pass"], pinfo["l2tp_psk"], now(), foreign_id))
+            # a direct service has the same box on both sides of the pair
+            sid = x("INSERT INTO services(name,iran_id,foreign_id,status,created_at,note)"
+                    " VALUES(?,?,?,'building',?,'direct')",
+                    (name or ("direct-%s" % fgn["ip"]), foreign_id, foreign_id, now()))
+
+            if migrate_from:
+                jset(60, "users", ">> copying accounts (with used data + days) ...")
+                copied = copy_users(migrate_from, sid, migrate_usernames)
+                jset(line="   copied %d accounts" % copied)
+            n = push_users(fgn, sid)
+            jset(75, "users", ">> pushed %d accounts to the panel" % n)
+
+            jset(88, "verify", ">> verifying ...")
+            checks = verify_service(fgn, fgn, direct=True)
+            ok = all(c[1] for c in checks)
+            for label, good, detail in checks:
+                jset(line=("   [OK] " if good else "   [!!] ") + label + " -> " + str(detail))
+            x("UPDATE services SET status=? WHERE id=?", ("live" if ok else "degraded", sid))
+            pull_users(fgn, sid)
+            res = ("Direct service is LIVE.\nCustomers connect straight to %s:1194\n"
+                   "Panel: https://%s:%s/  (%s / %s)\nL2TP PSK: %s\nTheir IP will be %s" % (
+                       fgn["ip"], fgn["ip"], pinfo["panel_port"], pinfo["panel_user"],
+                       pinfo["panel_pass"], pinfo["l2tp_psk"], fgn["ip"])) \
+                if ok else "Installed, but some checks failed - see the log above."
+            jset(100, "done", done=True, running=False, ok=ok, result=res)
+        except Exception as e:
+            jset(step="error", line="ERROR: %s" % e, done=True, running=False, ok=False,
+                 result="Failed: %s" % e)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def job_new_service(iran_id, foreign_id, name, panel_user, panel_pass, migrate_from=None,
                     migrate_usernames=None):
     def run():
