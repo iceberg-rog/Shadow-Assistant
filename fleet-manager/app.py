@@ -8,7 +8,7 @@ import os, sys, json, time, threading, webbrowser, datetime, subprocess, urllib.
 import core, engine
 from core import q, x, now, today
 
-VERSION = "1.4"      # bumped on every build handed out - drives the upgrade takeover
+VERSION = "1.5"      # bumped on every build handed out - drives the upgrade takeover
 
 # Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
 # hatch for the rare case where 8770 belongs to some other program.
@@ -232,6 +232,11 @@ function build(){
    +'<div class=hint>No Iran relay at all: OpenVPN + L2TP + the panel run on the foreign server and customers dial it straight, '
    +'keeping their data used and days left. Use this when the domestic servers are filtered. '
    +'<b>Trade-off:</b> the connection goes abroad with nothing domestic in front of it, so it is easier for an ISP to spot and block than the relay setup &mdash; expect to swap the IP more often.</div></div>';
+  h+='<div class=card><h2>Already have a running DIRECT server?</h2>'
+   +'<div class=row><div><label>Foreign server</label>'+sel('adfg',fg)+'</div>'
+   +'<div><button class=ghost onclick=doAdoptDirect()>Import it</button></div></div>'
+   +'<div class=hint>For a box already set up (e.g. with <span class=mono>setup-direct.sh</span>): reads its panel login and its accounts '
+   +'into the app <b>without reinstalling anything</b>.</div></div>';
   h+='<div class=card><h2>Already have a running pair?</h2>'
    +'<div class=row><div><label>Iran server</label>'+sel('air',ir)+'</div>'
    +'<div><label>Foreign server</label>'+sel('afg',fg)+'</div>'
@@ -251,6 +256,10 @@ function doDirect(){
   if(!confirm('Install OpenVPN + panel directly on that foreign server?\n\nCustomers will connect straight to it - no Iran relay.'))return;
   showJob();
   api('/api/build-direct',{foreign:dfg.value,name:dname.value,puser:dpu.value,ppass:dpp.value,copy_from:dcopy.value}).then(poll);
+}
+function doAdoptDirect(){
+  if(!adfg.value){alert('Pick the foreign server.');return;}
+  showJob();api('/api/adopt-direct',{foreign:adfg.value}).then(poll);
 }
 function doAdopt(){
   if(!air.value||!afg.value){alert('Pick both servers.');return;}
@@ -286,7 +295,19 @@ function addUser(){
 function uact(id,a){if(a=='del'&&!confirm('Delete this account?'))return;api('/api/user-act',{id:id,action:a}).then(load);}
 function migrate(){
   var ir=(S.servers||[]).filter(s=>s.role=='iran'), fg=(S.servers||[]).filter(s=>s.role=='foreign');
-  var h='<div class=card><h2>Replace the FOREIGN server (exit got filtered)</h2><div class=row>'
+  var direct=(S.services||[]).filter(s=>s.note=='direct');
+  var h='';
+  if(direct.length){
+    h+='<div class=card style="border-color:#5b4a1f"><h2>Move a DIRECT service to a new server</h2><div class=row>'
+     +'<div><label>Direct service</label><select id=mdsvc>'
+     +direct.map(s=>'<option value='+s.id+'>'+esc(s.name)+' ('+esc(s.iran_ip)+', '+s.user_count+' users)</option>').join('')
+     +'</select></div>'
+     +'<div><label>New foreign server</label>'+sel('mdnew',fg)+'</div>'
+     +'<div><button onclick=doRepDirect()>Move it</button></div></div>'
+     +'<div class=hint>Rebuilds everything on the new box and brings every account over <b>with its data used and days left</b> '
+     +'&mdash; even if the old server is already dead. Afterwards give customers the new IP and re-download the .ovpn.</div></div>';
+  }
+  h+='<div class=card><h2>Replace the FOREIGN server (exit got filtered)</h2><div class=row>'
    +'<div><label>Service</label>'+selService('mfsvc')+'</div>'
    +'<div><label>New foreign server</label>'+sel('mfnew',fg)+'</div>'
    +'<div><button onclick=doRepFg()>Swap the exit</button></div></div>'
@@ -301,6 +322,12 @@ function migrate(){
   return h;
 }
 function doRepFg(){if(!mfsvc.value||!mfnew.value){alert('Pick a service and a new foreign server.');return;}showJob();api('/api/replace-foreign',{service:mfsvc.value,foreign:mfnew.value}).then(poll);}
+function doRepDirect(){
+  if(!mdsvc.value||!mdnew.value){alert('Pick a direct service and a new foreign server.');return;}
+  var s=(S.services||[]).filter(x=>x.id==mdsvc.value)[0]||{}, n=(S.servers||[]).filter(x=>x.id==mdnew.value)[0]||{};
+  if(!confirm('Move '+(s.name||'')+' from '+(s.iran_ip||'')+' to '+(n.ip||'')+'?\n\nCustomers must be given the new address afterwards.'))return;
+  showJob();api('/api/replace-direct',{service:mdsvc.value,foreign:mdnew.value}).then(poll);
+}
 function doRepIr(){if(!misvc.value||!minew.value){alert('Pick a service and a new Iran server.');return;}
   if(!confirm('Rebuild the service on the new Iran server? Accounts keep their data and days.'))return;
   showJob();api('/api/replace-iran',{service:misvc.value,iran:minew.value}).then(poll);}
@@ -439,11 +466,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                           f.get("puser") or "admin", f.get("ppass") or None,
                                           int(f["copy_from"]) if f.get("copy_from") else None)
                 self._json({"ok": True})
+            elif p == "/api/adopt-direct":
+                engine.job_adopt_direct(int(f["foreign"]))
+                self._json({"ok": True})
             elif p == "/api/adopt":
                 engine.job_adopt(iran_id=int(f["iran"]), foreign_id=int(f["foreign"]))
                 self._json({"ok": True})
             elif p == "/api/replace-foreign":
                 engine.job_replace_foreign(int(f["service"]), int(f["foreign"]))
+                self._json({"ok": True})
+            elif p == "/api/replace-direct":
+                engine.job_replace_direct(int(f["service"]), int(f["foreign"]))
                 self._json({"ok": True})
             elif p == "/api/replace-iran":
                 engine.job_replace_iran(int(f["service"]), int(f["iran"]))

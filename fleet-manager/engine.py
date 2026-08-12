@@ -435,6 +435,111 @@ def copy_users(src_service_id, dst_service_id, usernames=None):
     return n
 
 
+def job_adopt_direct(foreign_id, name=None):
+    """Import a direct server that is ALREADY running - reads its panel login and
+    its accounts, registers the service, and installs nothing. Use it for a box
+    set up with standalone/setup-direct.sh, or to pick an existing service up on
+    a second PC."""
+    def run():
+        try:
+            jreset()
+            fgn = q("SELECT * FROM servers WHERE id=?", (foreign_id,), one=True)
+            jset(15, "read", ">> reading %s (nothing will be installed) ..." % fgn["ip"])
+            with SSH(fgn["ip"], fgn["ssh_user"], fgn["auth_method"], fgn["secret"]) as s:
+                unit = s.run("cat /etc/systemd/system/ovpn-panel.service 2>/dev/null || true")
+                if "PANEL_PASS" not in unit:
+                    raise RuntimeError("no VPN panel found on %s - build the service first" % fgn["ip"])
+                def env(k, d=""):
+                    m = re.search(r"%s=(\S+)" % k, unit)
+                    return m.group(1) if m else d
+                puser, ppass = env("PANEL_USER", "admin"), env("PANEL_PASS")
+                pport = env("PANEL_PORT", "2098")
+                psk = _read_psk(s)
+                ovpn = s.run("ss -tln | grep -c ':1194 ' || true").strip()
+                if ovpn in ("", "0"):
+                    raise RuntimeError("OpenVPN is not listening on %s" % fgn["ip"])
+                direct = "0" if "active" in s.run("systemctl is-active tcp2socks 2>/dev/null") else "1"
+            x("UPDATE servers SET status='installed',panel_port=?,panel_user=?,panel_pass=?,l2tp_psk=?,last_seen=? WHERE id=?",
+              (int(pport), puser, ppass, psk, now(), foreign_id))
+            jset(50, "read", "   panel on %s, L2TP PSK read, OpenVPN up" % pport)
+
+            svc = q("SELECT * FROM services WHERE iran_id=? AND foreign_id=?", (foreign_id, foreign_id), one=True)
+            if svc:
+                sid = svc["id"]
+                jset(line="   service already known - refreshing it")
+            else:
+                sid = x("INSERT INTO services(name,iran_id,foreign_id,status,created_at,note)"
+                        " VALUES(?,?,?,'live',?,'direct')",
+                        (name or ("direct-%s" % fgn["ip"]), foreign_id, foreign_id, now()))
+            n, live = pull_users(fgn, sid)
+            jset(85, "users", ">> imported %d accounts (with their data used + days left)" % n)
+            checks = verify_service(fgn, fgn, direct=True)
+            ok = all(c[1] for c in checks)
+            for label, good, detail in checks:
+                jset(line=("   [OK] " if good else "   [!!] ") + label + " -> " + str(detail))
+            x("UPDATE services SET status=? WHERE id=?", ("live" if ok else "degraded", sid))
+            jset(100, "done", done=True, running=False, ok=True,
+                 result=("Imported %s with %d accounts.\nPanel: https://%s:%s/  (%s / %s)\n"
+                         "Customers connect to %s:1194" % (fgn["ip"], n, fgn["ip"], pport, puser, ppass, fgn["ip"])))
+        except Exception as e:
+            jset(step="error", line="ERROR: %s" % e, done=True, running=False, ok=False,
+                 result="Import failed: %s" % e)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def job_replace_direct(service_id, new_foreign_id):
+    """Move a DIRECT service to a new foreign box.
+
+    A direct service has no relay to hide behind, so the customer-facing address
+    IS the server - replacing it means rebuilding there and handing out the new
+    IP. Accounts move with their used data and remaining days. The old box is
+    left alone (it may already be blocked/dead); it just stops being referenced.
+    """
+    def run():
+        try:
+            jreset()
+            svc = q("SELECT * FROM services WHERE id=?", (service_id,), one=True)
+            old = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
+            fgn = q("SELECT * FROM servers WHERE id=?", (new_foreign_id,), one=True)
+            jset(8, "server", ">> building %s as the new direct server ..." % fgn["ip"])
+            pinfo = build_iran(fgn, fgn["ip"], {}, "admin", None, direct=True)
+            x("UPDATE servers SET status='installed',panel_port=?,panel_user=?,panel_pass=?,l2tp_psk=?,last_seen=? WHERE id=?",
+              (pinfo["panel_port"], pinfo["panel_user"], pinfo["panel_pass"], pinfo["l2tp_psk"], now(), new_foreign_id))
+
+            # try to bank the latest usage off the old box first; it is often already
+            # unreachable (that is usually WHY it is being replaced), so never fail on it
+            try:
+                jset(55, "users", ">> reading the latest usage off the old server ...")
+                pull_users(old, service_id, log_usage=False)
+            except Exception:
+                jset(line="   old server unreachable - using the last figures stored here")
+
+            x("UPDATE services SET iran_id=?, foreign_id=? WHERE id=?",
+              (new_foreign_id, new_foreign_id, service_id))
+            n = push_users(fgn, service_id)
+            jset(75, "users", ">> moved %d accounts (data used + days kept)" % n)
+
+            jset(88, "verify", ">> verifying ...")
+            checks = verify_service(fgn, fgn, direct=True)
+            ok = all(c[1] for c in checks)
+            for label, good, detail in checks:
+                jset(line=("   [OK] " if good else "   [!!] ") + label + " -> " + str(detail))
+            x("UPDATE services SET status=? WHERE id=?", ("live" if ok else "degraded", service_id))
+            pull_users(fgn, service_id)
+            log_event("migrate", "direct service moved %s -> %s" % (old["ip"] if old else "?", fgn["ip"]))
+            res = ("Moved to %s.\nGive customers the new address: %s:1194\n"
+                   "Panel: https://%s:%s/  (%s / %s)\nL2TP PSK: %s\n"
+                   "Re-download the .ovpn from the dashboard - the old one points at the old IP."
+                   % (fgn["ip"], fgn["ip"], fgn["ip"], pinfo["panel_port"], pinfo["panel_user"],
+                      pinfo["panel_pass"], pinfo["l2tp_psk"])) \
+                if ok else "Rebuilt on %s, but some checks failed - see the log." % fgn["ip"]
+            jset(100, "done", done=True, running=False, ok=ok, result=res)
+        except Exception as e:
+            jset(step="error", line="ERROR: %s" % e, done=True, running=False, ok=False,
+                 result="Failed: %s" % e)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def job_replace_foreign(service_id, new_foreign_id):
     """Swap ONLY the foreign exit. Iran box, users, usage and days stay put."""
     def run():
