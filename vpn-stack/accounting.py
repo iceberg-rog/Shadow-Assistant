@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # Per-user traffic accounting + quota/expiry enforcement for OpenVPN + L2TP.
-import json, os, time, socket, datetime, fcntl
+import json, os, time, socket, datetime, fcntl, glob
 USERS="/opt/ovpnpanel/users.json"
+# One status log per OpenVPN instance (1194 and the 443 disguise instance). Quota
+# and device counts must span ALL of them, or a user simply switches port to get
+# unmetered traffic.
+def status_logs():
+    return sorted(glob.glob("/var/log/openvpn-status*.log")) or ["/var/log/openvpn-status.log"]
+MGMT_PORTS=(7505, 7506)
 OVPN_STATUS="/var/log/openvpn-status.log"
 L2TP_MAP="/run/l2tp-map"; CHAP="/etc/ppp/chap-secrets"; GB=1024**3
 LAST_FILE="/run/vpn-acct-last.json"
@@ -35,26 +41,30 @@ def _rmw(fn):
 
 def sample():
     out={}
-    try:
-        inblk=False
-        for ln in open(OVPN_STATUS).read().splitlines():
-            if ln.startswith("CLIENT_LIST,"):
-                # OpenVPN 2.4+ machine format: CLIENT_LIST,CN,Real,Virtual,Virtual6,BytesRecv,BytesSent,...
-                p=ln.split(",")
-                if len(p)>=7 and p[1] and p[1]!="UNDEF":
-                    try: out["ovpn:"+p[1]]=(p[1], int(p[5])+int(p[6]))
-                    except Exception: pass
-            elif ln.startswith("Common Name,"):
-                inblk=True
-            elif ln.startswith("ROUTING TABLE") or ln.startswith("GLOBAL"):
-                inblk=False
-            elif inblk and "," in ln:
-                # legacy v1 format: CN,Real,BytesRecv,BytesSent,Since
-                p=ln.split(",")
-                if len(p)>=4 and p[0] and p[0]!="UNDEF":
-                    try: out["ovpn:"+p[0]]=(p[0], int(p[2])+int(p[3]))
-                    except Exception: pass
-    except Exception: pass
+    for path in status_logs():
+        tag=os.path.basename(path)          # keeps 1194 and 443 sessions distinct
+        try:
+            inblk=False
+            for ln in open(path).read().splitlines():
+                if ln.startswith("CLIENT_LIST,"):
+                    # OpenVPN 2.4+ machine format: CLIENT_LIST,CN,Real,Virtual,Virtual6,BytesRecv,BytesSent,...
+                    p=ln.split(",")
+                    if len(p)>=7 and p[1] and p[1]!="UNDEF":
+                        # one row per connection, not per user: a user on two devices
+                        # has two rows and both must be counted
+                        try: out["ovpn:"+tag+":"+p[1]+":"+p[2]]=(p[1], int(p[5])+int(p[6]))
+                        except Exception: pass
+                elif ln.startswith("Common Name,"):
+                    inblk=True
+                elif ln.startswith("ROUTING TABLE") or ln.startswith("GLOBAL"):
+                    inblk=False
+                elif inblk and "," in ln:
+                    # legacy v1 format: CN,Real,BytesRecv,BytesSent,Since
+                    p=ln.split(",")
+                    if len(p)>=4 and p[0] and p[0]!="UNDEF":
+                        try: out["ovpn:"+tag+":"+p[0]+":"+p[1]]=(p[0], int(p[2])+int(p[3]))
+                        except Exception: pass
+        except Exception: pass
     try:
         for iface in os.listdir(L2TP_MAP):
             try:
@@ -88,23 +98,27 @@ def sync_chap(users):
     except Exception: pass
 
 def ovpn_kill(cn):
-    try:
-        s=socket.create_connection(("127.0.0.1",7505),timeout=3)
-        s.recv(4096); s.sendall(("kill %s\n"%cn).encode()); time.sleep(0.2); s.recv(4096); s.close()
-    except Exception: pass
+    # the same account can be on either instance, so ask both to drop it
+    for port in MGMT_PORTS:
+        try:
+            s=socket.create_connection(("127.0.0.1",port),timeout=3)
+            s.recv(4096); s.sendall(("kill %s\n"%cn).encode()); time.sleep(0.2); s.recv(4096); s.close()
+        except Exception: pass
 
 def ovpn_conns():
-    """CN -> list of (real_addr, connected_since_epoch), one entry per live connection."""
+    """CN -> list of (real_addr, connected_since_epoch), one entry per live
+    connection ACROSS every instance - the device cap counts 1194 and 443 together."""
     conns={}
-    try:
-        for ln in open(OVPN_STATUS).read().splitlines():
-            if ln.startswith("CLIENT_LIST,"):
-                p=ln.split(",")
-                if len(p)>=9 and p[1] and p[1]!="UNDEF":
-                    try: since=int(p[8])
-                    except Exception: since=0
-                    conns.setdefault(p[1],[]).append((p[2], since))
-    except Exception: pass
+    for path in status_logs():
+        try:
+            for ln in open(path).read().splitlines():
+                if ln.startswith("CLIENT_LIST,"):
+                    p=ln.split(",")
+                    if len(p)>=9 and p[1] and p[1]!="UNDEF":
+                        try: since=int(p[8])
+                        except Exception: since=0
+                        conns.setdefault(p[1],[]).append((p[2], since))
+        except Exception: pass
     return conns
 
 def enforce_maxconn(users):

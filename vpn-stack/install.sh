@@ -38,8 +38,13 @@ else
 fi
 PANEL_PORT="${PANEL_PORT:-2098}"
 PANEL_USER="${PANEL_USER:-admin}"
-PANEL_PASS="${PANEL_PASS:-$(openssl rand -base64 9 | tr -dc 'A-Za-z0-9')}"
-L2TP_PSK="${L2TP_PSK:-$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9')}"
+# Re-running the installer must NOT silently rotate the credentials: the operator
+# (and Fleet Manager's database) already have them written down. Keep whatever is
+# on the box unless new values are passed in explicitly.
+OLD_PASS="$(grep -oP 'PANEL_PASS=\K\S+' /etc/systemd/system/ovpn-panel.service 2>/dev/null || true)"
+OLD_PSK="$(grep -oP 'PSK "\K[^"]+' /etc/ipsec.secrets 2>/dev/null || true)"
+PANEL_PASS="${PANEL_PASS:-${OLD_PASS:-$(openssl rand -base64 9 | tr -dc 'A-Za-z0-9')}}"
+L2TP_PSK="${L2TP_PSK:-${OLD_PSK:-$(openssl rand -base64 12 | tr -dc 'A-Za-z0-9')}}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo ">> VPN stack: relay $RELAY_IP -> exit $EXIT_IP"
@@ -83,7 +88,11 @@ if [ ! -f /etc/openvpn/server/server.crt ]; then
     cp pki/ca.crt pki/issued/server.crt pki/private/server.key /etc/openvpn/server/
     cp /etc/openvpn/ta.key /etc/openvpn/server/ )
 fi
-install -m644 "$DIR/templates/openvpn-server.conf" /etc/openvpn/server/server.conf
+install -m644 "$DIR/templates/openvpn-server.conf"    /etc/openvpn/server/server.conf
+# second instance on 443 - same accounts, different port. ISPs that throttle
+# "VPN-looking" traffic on 1194 usually leave 443 alone, and tls-crypt hides the
+# OpenVPN handshake, so a customer whose main profile stalls can switch to this.
+install -m644 "$DIR/templates/openvpn-server443.conf" /etc/openvpn/server/server443.conf
 
 # --- 4) xray-ovpn: socks(:11080) -> fleet tunnel -> exit  (relay mode only) ---
 if [ "$DIRECT" != 1 ]; then
@@ -136,6 +145,15 @@ rm -f "/run/l2tp-map/$PPP_IFACE"
 EOF
 chmod +x /etc/ppp/ip-up.d/vpn-acct /etc/ppp/ip-down.d/vpn-acct
 echo 'l2tp_ppp' > /etc/modules-load.d/l2tp.conf; modprobe l2tp_ppp 2>/dev/null || true
+
+# --- 7b) swap + BBR: a 1-2 GB box with no swap kills openvpn under load, and BBR
+#          lifts throughput a lot on the long, lossy path back to Iran ---
+if [ "$(free -m | awk '/Swap:/{print $2}')" = "0" ] && [ ! -f /swapfile ]; then
+  fallocate -l 2G /swapfile 2>/dev/null && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 \
+    && swapon /swapfile 2>/dev/null && ! grep -q '^/swapfile' /etc/fstab && echo '/swapfile none swap sw 0 0' >> /etc/fstab || true
+fi
+modprobe tcp_bbr 2>/dev/null || true
+printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.ipv4.tcp_mtu_probing=1\n' > /etc/sysctl.d/99-bbr.conf
 
 # --- 7) sysctl (forwarding + IPsec) ---
 cat > /etc/sysctl.d/60-vpn-stack.conf <<'EOF'
@@ -252,27 +270,28 @@ if [ "$DIRECT" = 1 ]; then
   # no tunnel plumbing in direct mode - make sure a previous relay install's
   # services are not left running and hijacking the traffic
   systemctl disable --now xray-ovpn tcp2socks dns2socks >/dev/null 2>&1 || true
-  systemctl enable --now openvpn-server@server vpn-accounting ovpn-panel >/dev/null 2>&1
+  systemctl enable --now openvpn-server@server openvpn-server@server443 vpn-accounting ovpn-panel >/dev/null 2>&1
 else
-  systemctl enable --now openvpn-server@server xray-ovpn tcp2socks dns2socks vpn-accounting ovpn-panel >/dev/null 2>&1
+  systemctl enable --now openvpn-server@server openvpn-server@server443 xray-ovpn tcp2socks dns2socks vpn-accounting ovpn-panel >/dev/null 2>&1
 fi
 systemctl enable strongswan-starter xl2tpd >/dev/null 2>&1
 systemctl restart strongswan-starter xl2tpd
 systemctl restart dnsmasq
-systemctl start ovpn-route
+systemctl enable ovpn-route >/dev/null 2>&1   # must survive a reboot: without it the
+systemctl start ovpn-route                     # NAT/forward rules are gone and no client has internet
 sleep 2
 
 echo
 echo "================= VPN STACK INSTALLED ================="
 if [ "$DIRECT" = 1 ]; then
   echo "  Mode:       DIRECT (customers dial this server, no Iran relay)"
-  SVC_LIST="openvpn-server@server vpn-accounting ovpn-panel strongswan-starter xl2tpd"
+  SVC_LIST="openvpn-server@server openvpn-server@server443 vpn-accounting ovpn-panel strongswan-starter xl2tpd"
 else
   echo "  Mode:       relay -> tunnel -> foreign exit"
-  SVC_LIST="openvpn-server@server xray-ovpn tcp2socks vpn-accounting ovpn-panel strongswan-starter xl2tpd"
+  SVC_LIST="openvpn-server@server openvpn-server@server443 xray-ovpn tcp2socks vpn-accounting ovpn-panel strongswan-starter xl2tpd"
 fi
 echo "  Panel:      https://$RELAY_IP:$PANEL_PORT/    ($PANEL_USER / $PANEL_PASS)"
-echo "  OpenVPN:    port 1194/tcp, shared .ovpn from the panel, user/pass login"
+echo "  OpenVPN:    port 1194/tcp (and 443/tcp as a backup that looks like HTTPS)"
 echo "  L2TP/IPsec: server $RELAY_IP, PSK: $L2TP_PSK, user/pass from the panel"
 echo "  Egress IP:  $EXIT_IP"
 echo "  Services:   $(for s in $SVC_LIST; do printf '%s=%s ' "$s" "$(systemctl is-active "$s")"; done)"

@@ -8,7 +8,7 @@ import os, sys, json, time, threading, webbrowser, datetime, subprocess, urllib.
 import core, engine
 from core import q, x, now, today
 
-VERSION = "1.5"      # bumped on every build handed out - drives the upgrade takeover
+VERSION = "1.6"      # bumped on every build handed out - drives the upgrade takeover
 
 # Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
 # hatch for the rare case where 8770 belongs to some other program.

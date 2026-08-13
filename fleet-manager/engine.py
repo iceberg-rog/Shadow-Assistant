@@ -52,7 +52,8 @@ def asset(*p):
 
 VPN_FILES = ["install.sh", "accounting.py", "dns2socks.py", "ovpn-auth.py", "panel.py", "tcp2socks.py"]
 VPN_TPL = ["config-ovpn.json", "ipsec.conf", "openvpn-server.conf", "options.xl2tpd",
-           "ovpn-route-up.sh", "ovpn-route-direct.sh", "xl2tpd.conf"]
+           "ovpn-route-up.sh", "ovpn-route-direct.sh", "xl2tpd.conf",
+           "openvpn-server443.conf"]
 
 
 # ------------------------------------------------------- foreign exit build

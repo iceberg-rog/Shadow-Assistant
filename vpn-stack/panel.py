@@ -79,12 +79,13 @@ def live_conns():
     except Exception: pass
     return c
 
-def ovpn_template():
+def ovpn_template(port="1194"):
     try: ca=open(CA).read(); ta=open(TA).read()
     except Exception: return None
-    return ("client\ndev tun\nproto tcp\nremote "+SERVER_IP+" 1194\nnobind\n"
+    # tun-mtu/mssfix must match the server or big transfers stall on mobile
+    return ("client\ndev tun\nproto tcp\nremote "+SERVER_IP+" "+str(port)+"\nnobind\n"
             "auth-user-pass\nremote-cert-tls server\ncipher AES-256-GCM\nauth SHA256\n"
-            "redirect-gateway def1\ndhcp-option DNS 1.1.1.1\ndhcp-option DNS 8.8.8.8\nverb 3\n"
+            "redirect-gateway def1\ntun-mtu 1400\nmssfix 1360\nverb 3\n"
             "<ca>\n"+ca+"</ca>\n<tls-crypt>\n"+ta+"</tls-crypt>\n")
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -100,11 +101,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if not self.ok_auth(): return
         u=urllib.parse.urlparse(self.path)
         if u.path=="/ovpn":
-            t=ovpn_template()
+            port=urllib.parse.parse_qs(u.query).get("port",["1194"])[0]
+            port="443" if port=="443" else "1194"
+            t=ovpn_template(port)
             if t is None: self.send_response(500); self.end_headers(); return
             b=t.encode(); self.send_response(200)
             self.send_header("Content-Type","application/x-openvpn-profile")
-            self.send_header("Content-Disposition",'attachment; filename="fleet-ovpn.ovpn"')
+            self.send_header("Content-Disposition",'attachment; filename="fleet-%s.ovpn"'%port)
             self.send_header("Content-Length",str(len(b))); self.end_headers(); self.wfile.write(b); return
         if u.path=="/backup":
             # full fleet state: live VPN users.json + latest Marzban DB (pushed by the exit)
@@ -198,7 +201,8 @@ class H(http.server.BaseHTTPRequestHandler):
         "<button>+ Add user</button></form>"
         "<table><tr><th>username</th><th>password</th><th>expires</th><th>data used</th><th>devices (now/max)</th><th>status</th><th>actions</th></tr>"+rows+"</table>"
         "<h3>How clients connect</h3>"
-        "<div class=box><b>OpenVPN:</b> download <a href=/ovpn>fleet-ovpn.ovpn</a> (same file for everyone) &rarr; import in any OpenVPN app &rarr; it asks for <b>username + password</b> from the table above.</div>"
+        "<div class=box><b>OpenVPN:</b> download <a href=/ovpn><b>fleet-1194.ovpn</b></a> (same file for everyone) &rarr; import in any OpenVPN app &rarr; it asks for <b>username + password</b> from the table above."
+        "<br><b>If it connects but nothing loads</b>, give that customer <a href=/ovpn?port=443><b>fleet-443.ovpn</b></a> instead &mdash; same account, port 443, which ISPs are far less likely to throttle.</div>"
         "<div class=box><b>L2TP/IPsec:</b> Server <code>"+SERVER_IP+"</code> &middot; Pre-shared key <code>"+html.escape(get_psk())+"</code> &middot; username + password from the table.</div>"
         "<h3>Backup &amp; migration</h3>"
         "<div class=box>All accounts (VPN + v2ray) with their <b>used data</b> and <b>remaining days</b> are backed up automatically. "
