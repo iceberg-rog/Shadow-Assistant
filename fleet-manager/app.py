@@ -5,10 +5,10 @@ to the internet (it binds 127.0.0.1 only). All state lives in fleet.db beside
 the exe, so accounts survive any server being replaced.
 """
 import os, sys, json, time, threading, webbrowser, datetime, subprocess, urllib.parse, urllib.request, http.server, socketserver, socket
-import core, engine
+import core, engine, v2ray, v2ray_jobs
 from core import q, x, now, today
 
-VERSION = "1.6"      # bumped on every build handed out - drives the upgrade takeover
+VERSION = "2.0"      # bumped on every build handed out - drives the upgrade takeover
 
 # Fixed on purpose: one app, one port, one database. FLEET_PORT is an escape
 # hatch for the rare case where 8770 belongs to some other program.
@@ -89,6 +89,7 @@ dialog::backdrop{background:rgba(0,0,0,.6)}
   <button data-t=dash class=on onclick=tab('dash')>Dashboard</button>
   <button data-t=servers onclick=tab('servers')>Servers</button>
   <button data-t=build onclick=tab('build')>New service</button>
+  <button data-t=v2ray onclick=tab('v2ray')>v2ray</button>
   <button data-t=users onclick=tab('users')>Users</button>
   <button data-t=migrate onclick=tab('migrate')>Replace a server</button>
 </div>
@@ -118,6 +119,7 @@ function render(){
   if(cur=='dash')v.innerHTML=dash();
   else if(cur=='servers')v.innerHTML=servers();
   else if(cur=='build')v.innerHTML=build();
+  else if(cur=='v2ray')v.innerHTML=v2rayTab();
   else if(cur=='users')v.innerHTML=users();
   else v.innerHTML=migrate();
   if(cur=='dash')drawChart();
@@ -257,6 +259,113 @@ function doDirect(){
   showJob();
   api('/api/build-direct',{foreign:dfg.value,name:dname.value,puser:dpu.value,ppass:dpp.value,copy_from:dcopy.value}).then(poll);
 }
+function v2rayTab(){
+  var fg=(S.servers||[]).filter(s=>s.role=='foreign');
+  var svcs=(S.services||[]).filter(s=>s.kind=='v2ray');
+  var probe=(S.servers||[]).filter(s=>s.is_probe);
+  var h='<div class=card style="border-color:#1f5b3a"><h2>Build a v2ray service (works from Iran)</h2>'
+   +'<div class=row>'
+   +'<div><label>Foreign server</label>'+sel('vfg',fg)+'</div>'
+   +'<div><label>Service name</label><input id=vname placeholder="my v2ray"></div>'
+   +'<div><label>Bring accounts from</label>'+selService('vcopy',true)+'</div>'
+   +'<div><button onclick=doV2ray()>Install</button></div></div>'
+   +'<div class=hint>Installs the panel and four entry protocols on that one server: '
+   +'<b>VLESS-REALITY</b> 443 &middot; <b>Trojan-REALITY</b> 8443 &middot; <b>VMess</b> 8080 &middot; <b>Shadowsocks</b> 8388. '
+   +'Each customer gets ONE subscription link containing all four, so when an ISP blocks one they switch inside their app. '
+   +'OpenVPN is not offered here on purpose &mdash; on the Iran path it is identified and reset no matter the port.</div></div>';
+
+  h+='<div class=card><h2>Iran probe &mdash; how we know a server is not filtered</h2>';
+  if(probe.length){
+    h+='<div class=mini>Using <span class=mono>'+esc(probe[0].ip)+'</span> to test reachability from inside Iran. '
+      +'It is only ever asked to open a TCP port; nothing is installed on it. '
+      +'<button class=ghost onclick="setProbe(0)">stop using it</button></div>';
+  } else {
+    h+='<div class=row><div><label>An Iran server to test from</label>'
+      +sel('vprobe',(S.servers||[]).filter(s=>s.role=='iran'))+'</div>'
+      +'<div><button class=ghost onclick=setProbeSel()>Use as probe</button></div></div>'
+      +'<div class=hint>Without this, nobody can tell whether a new server is already blocked in Iran until customers complain. '
+      +'Add any Iran box in the Servers tab and select it here &mdash; it carries no traffic.</div>';
+  }
+  h+='</div>';
+
+  h+='<div class=card><h2>v2ray services</h2>';
+  if(!svcs.length){ h+='<div class=mini>None yet.</div>'; }
+  else{
+    h+='<table><tr><th>name</th><th>server</th><th>users</th><th>traffic</th><th>status</th><th></th></tr>';
+    svcs.forEach(function(s){
+      h+='<tr><td>'+esc(s.name)+'</td><td class=mono>'+esc(s.foreign_ip)+'</td><td>'+s.user_count+'</td>'
+       +'<td>'+esc(s.total_h)+'</td><td><span class="tag '+(s.status=='live'?'t-ok':'t-bad')+'">'+esc(s.status)+'</span></td>'
+       +'<td><button class=ghost onclick="testV2('+s.id+')">test now</button> '
+       +(s.panel_url?'<a href="'+esc(s.panel_url)+'" target=_blank><button class=ghost>panel</button></a>':'')+'</td></tr>';
+      h+='<tr><td colspan=6 class=mini style=padding-top:0>&nbsp;&nbsp;panel login: <span class=mono>'
+       +esc(s.panel_user||'')+' / '+esc(s.panel_pass||'')+'</span></td></tr>';
+    });
+    h+='</table>';
+  }
+  h+='</div>';
+
+  h+='<div class=card><h2>Accounts</h2>';
+  if(!svcs.length){ h+='<div class=mini>Build a service first.</div>'; }
+  else{
+    h+='<div class=row><div><label>Service</label><select id=vsvc onchange=load()>'
+     +svcs.map(s=>'<option value='+s.id+'>'+esc(s.name)+'</option>').join('')+'</select></div>'
+     +'<div><label>Username</label><input id=vu placeholder="customer1" style=width:150px></div>'
+     +'<div><label>GB (0=unlimited)</label><input id=vgb type=number min=0 step=1 value=0 style=width:130px></div>'
+     +'<div><label>Days (0=unlimited)</label><input id=vd type=number min=0 value=30 style=width:130px></div>'
+     +'<div><button onclick=addV2User()>Add / update</button></div></div>';
+    var sid=(document.getElementById('vsvc')||{}).value||svcs[0].id;
+    var us=(S.users||[]).filter(u=>String(u.service_id)==String(sid));
+    h+='<table><tr><th>user</th><th>expires</th><th>used</th><th>limit</th><th>status</th><th>subscription</th><th></th></tr>';
+    us.forEach(function(u){
+      h+='<tr><td>'+esc(u.username)+'</td><td>'+esc(u.days_left)+'</td><td>'+esc(u.used_h)+'</td>'
+       +'<td>'+(u.limit_gb?esc(u.limit_gb)+' GB':'&infin;')+'</td>'
+       +'<td><span class="tag '+(u.enabled?'t-ok':'t-bad')+'">'+(u.enabled?'active':'off')+'</span></td>'
+       +'<td>'+(u.sub_url?'<button class=ghost onclick="copyTxt(\''+esc(u.sub_url)+'\',this)">copy link</button>':'-')+'</td>'
+       +'<td><button class=ghost onclick="v2act('+sid+',\''+esc(u.username)+'\',\'toggle\')">on/off</button> '
+       +'<button class=ghost onclick="v2act('+sid+',\''+esc(u.username)+'\',\'reset\')">reset data</button> '
+       +'<button class=danger onclick="v2act('+sid+',\''+esc(u.username)+'\',\'del\')">delete</button></td></tr>';
+    });
+    h+='</table><div class=hint>The subscription link carries all four protocols. If a customer says it stopped working, '
+     +'have them refresh the subscription in their app first &mdash; after a server move the same link picks up the new address.</div>';
+  }
+  h+='</div>';
+
+  if(svcs.length){
+    h+='<div class=card style="border-color:#5b4a1f"><h2>Server got filtered? Move the service</h2><div class=row>'
+     +'<div><label>Service</label><select id=vmsvc>'
+     +svcs.map(s=>'<option value='+s.id+'>'+esc(s.name)+' ('+esc(s.foreign_ip)+')</option>').join('')+'</select></div>'
+     +'<div><label>New foreign server</label>'+sel('vmnew',fg)+'</div>'
+     +'<div><button onclick=moveV2()>Move everything</button></div></div>'
+     +'<div class=hint>Rebuilds on the new server and brings every account with its used data and remaining days &mdash; '
+     +'even if the old server is already dead. The REALITY identity and panel login are carried over, then it tests the '
+     +'new server (including from Iran) before calling it live.</div></div>';
+  }
+  return h;
+}
+function copyTxt(t,btn){navigator.clipboard&&navigator.clipboard.writeText(t);var o=btn.textContent;btn.textContent='copied';setTimeout(()=>btn.textContent=o,1200);}
+function doV2ray(){
+  if(!vfg.value){alert('Add a foreign server first (Servers tab).');return;}
+  showJob();api('/api/v2ray-build',{foreign:vfg.value,name:vname.value,copy_from:vcopy.value}).then(poll);
+}
+function testV2(id){showJob();api('/api/v2ray-test',{service:id}).then(poll);}
+function addV2User(){
+  var sid=document.getElementById('vsvc').value;
+  if(!vu.value){alert('Enter a username');return;}
+  api('/api/v2ray-user-add',{service:sid,username:vu.value,gb:vgb.value,days:vd.value}).then(function(r){
+    if(r.err)alert(r.err); vu.value=''; load();});
+}
+function v2act(sid,u,a){
+  if(a=='del'&&!confirm('Delete '+u+'?'))return;
+  api('/api/v2ray-user-act',{service:sid,username:u,action:a}).then(load);
+}
+function moveV2(){
+  if(!vmnew.value){alert('Pick the new server.');return;}
+  if(!confirm('Move the service to that server? Customers keep their accounts; the address changes.'))return;
+  showJob();api('/api/v2ray-move',{service:vmsvc.value,foreign:vmnew.value}).then(poll);
+}
+function setProbeSel(){ if(!vprobe.value){alert('Add an Iran server first.');return;} setProbe(vprobe.value); }
+function setProbe(id){ api('/api/set-probe',{id:id}).then(load); }
+
 function doAdoptDirect(){
   if(!adfg.value){alert('Pick the foreign server.');return;}
   showJob();api('/api/adopt-direct',{foreign:adfg.value}).then(poll);
@@ -466,6 +575,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                           f.get("puser") or "admin", f.get("ppass") or None,
                                           int(f["copy_from"]) if f.get("copy_from") else None)
                 self._json({"ok": True})
+            elif p == "/api/v2ray-build":
+                v2ray_jobs.job_build(int(f["foreign"]), f.get("name"),
+                                     int(f["copy_from"]) if f.get("copy_from") else None)
+                self._json({"ok": True})
+            elif p == "/api/v2ray-move":
+                v2ray_jobs.job_replace(int(f["service"]), int(f["foreign"]))
+                self._json({"ok": True})
+            elif p == "/api/v2ray-test":
+                v2ray_jobs.job_test(int(f["service"]))
+                self._json({"ok": True})
+            elif p == "/api/v2ray-user-add":
+                try:
+                    v2ray.add_user(int(f["service"]), f["username"].strip(), f.get("gb") or 0, f.get("days") or 0)
+                    self._json({"ok": True})
+                except Exception as e:
+                    self._json({"err": str(e)})
+            elif p == "/api/v2ray-user-act":
+                try:
+                    v2ray.user_action(int(f["service"]), f["username"], f["action"])
+                    self._json({"ok": True})
+                except Exception as e:
+                    self._json({"err": str(e)})
+            elif p == "/api/set-probe":
+                # only one probe at a time; 0 clears it
+                x("UPDATE servers SET is_probe=0")
+                if f.get("id") and f["id"] != "0":
+                    x("UPDATE servers SET is_probe=1 WHERE id=?", (int(f["id"]),))
+                self._json({"ok": True})
             elif p == "/api/adopt-direct":
                 engine.job_adopt_direct(int(f["foreign"]))
                 self._json({"ok": True})
@@ -533,7 +670,8 @@ def state():
                              panel_user=iran.get("panel_user"), panel_pass=iran.get("panel_pass"),
                              l2tp_psk=iran.get("l2tp_psk"),
                              panel=("https://%s:%s/" % (iran.get("ip"), iran.get("panel_port") or 2098))
-                                   if iran.get("panel_port") else ""))
+                                   if iran.get("panel_port") else "",
+                             kind=(s.get("kind") or "vpn"), panel_url=s.get("panel_url")))
     users = []
     for u in q("SELECT u.*, s.name AS service_name FROM users u LEFT JOIN services s ON s.id=u.service_id"
                " ORDER BY u.service_id, u.username"):
@@ -574,6 +712,13 @@ def auto_refresh_loop():
             for s in services:
                 try:
                     svc = q("SELECT * FROM services WHERE id=?", (s["id"],), one=True)
+                    if (svc.get("kind") or "vpn") == "v2ray":
+                        # Marzban owns the accounts for these; mirror them the same way
+                        fgn = q("SELECT * FROM servers WHERE id=?", (svc["foreign_id"],), one=True)
+                        if fgn:
+                            v2ray.pull_users(fgn, s["id"])
+                            okc += 1
+                        continue
                     iran = q("SELECT * FROM servers WHERE id=?", (svc["iran_id"],), one=True)
                     if iran:
                         engine.pull_users(iran, s["id"], log_usage=snapshot)

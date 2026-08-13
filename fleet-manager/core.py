@@ -74,6 +74,20 @@ def init_db():
           ts TEXT, kind TEXT, msg TEXT
         );
         """)
+        # added later: columns are created on the fly so an existing fleet.db keeps working
+        for table, col, decl in (
+            ("services", "kind", "TEXT DEFAULT 'vpn'"),        # vpn (OpenVPN/L2TP) | v2ray (Marzban)
+            ("services", "panel_url", "TEXT"),
+            ("servers", "reality_priv", "TEXT"),               # so a replacement server can reuse
+            ("servers", "reality_pub", "TEXT"),                # the identity and keep customer links
+            ("servers", "reality_sid", "TEXT"),
+            ("servers", "is_probe", "INTEGER DEFAULT 0"),      # an Iran box used ONLY to test reachability
+            ("users", "sub_url", "TEXT"),                      # v2ray subscription link
+        ):
+            try:
+                c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, col, decl))
+            except Exception:
+                pass
 
 
 def log_event(kind, msg):
